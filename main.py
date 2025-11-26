@@ -1,31 +1,40 @@
+import datetime # ИСПРАВЛЕНО
 import asyncio
 import os
 import logging
 import random
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandObject
 from aiogram.enums import ParseMode
-from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Boolean, update
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Boolean, update, select, ForeignKey
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship # ФИКС: Исправлено предупреждение SQLAlchemy
 from sqlalchemy.future import select
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
 # --- Константы и Настройки ---
-# Включаем логирование
 logging.basicConfig(level=logging.INFO)
 
-# ID владельца (АДМИНА) бота для админ-панели (ЗАМЕНИ НА СВОЙ ID ТЕЛЕГРАМ)
-ADMIN_ID = 1871352653 # <--- ОБЯЗАТЕЛЬНО ИЗМЕНИТЬ!
+# ID владельца (АДМИНА) бота (ИЗМЕНИ НА СВОЙ ID)
+ADMIN_ID = 1871352653 
 
-# Настройки SQLite (сохранение в папке data на Bothost.ru)
+# Настройки SQLite 
 DB_PATH = "sqlite:///data/bongobot.db"
+
+# Настройки времени (в секундах)
 JOB_COOLDOWN_SECONDS = 3600 # 1 час
 ELECTION_COOLDOWN_SECONDS = 86400 # 24 часа
+CANDIDATE_PERIOD_SECONDS = 1800 # 30 минут на набор кандидатов
+VOTING_PERIOD_SECONDS = 3600  # 60 минут на голосование
 
-# Базовый класс для всех моделей
+# Состояние выборов (для Scheduler)
+ELECTION_STATE = "NONE" # NONE, CANDIDATE_REG, VOTING
+
 Base = declarative_base()
 
-# --- Модель Базы Данных ---
+# --- Модели Базы Данных ---
 class User(Base):
     __tablename__ = 'users'
     id = Column(BigInteger, primary_key=True, autoincrement=False)
@@ -36,18 +45,34 @@ class User(Base):
     property_count = Column(Integer, default=0) 
     xp = Column(Integer, default=0)
     is_president = Column(Boolean, default=False)
-    last_work_time = Column(BigInteger, default=0) # Время последнего "работы"
-    last_election_time = Column(BigInteger, default=0) # Время участия в выборах
+    last_work_time = Column(BigInteger, default=0) 
+    last_election_time = Column(BigInteger, default=0) # Время последнего участия в выборах/голосовании
+
+class Candidate(Base):
+    __tablename__ = 'candidates'
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, ForeignKey('users.id'), unique=True)
+    votes = Column(Integer, default=0)
+    
+    # Связь с таблицей User
+    user = relationship("User") 
+
+class Chat(Base):
+    __tablename__ = 'chats'
+    id = Column(BigInteger, primary_key=True, autoincrement=False) # ID чата/группы
+    last_message_id = Column(BigInteger, default=0) # ID последнего сообщения для уведомлений
 
 # --- Настройка SQLAlchemy ---
 engine = create_engine(DB_PATH, connect_args={"check_same_thread": False})
 Base.metadata.create_all(engine)
 Session = sessionmaker(bind=engine)
 
-# --- Настройка Бота ---
+# --- Настройка Бота и Планировщика ---
 TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+scheduler = AsyncIOScheduler()
+
 
 # --- Вспомогательные синхронные функции для работы с БД ---
 
@@ -63,14 +88,12 @@ def get_user_profile_sync(user_id: int, username: str):
                 username=username,
                 balance=500
             )
-            # Если ID совпадает с ADMIN_ID, делаем владельцем
             if user_id == ADMIN_ID:
                 user.is_owner = True
             
             session.add(user)
             session.commit()
             
-        # Загружаем данные перед закрытием сессии (критический фикс DetachedInstanceError)
         user = session.merge(user)
         return user
     finally:
@@ -85,7 +108,6 @@ def update_user_sync(user_id: int, **kwargs):
             for key, value in kwargs.items():
                 setattr(user, key, value)
             session.commit()
-            # Загружаем данные перед закрытием сессии
             user = session.merge(user)
         return user
     finally:
@@ -96,14 +118,213 @@ def get_all_users_sync():
     session = Session()
     try:
         users = session.execute(select(User).order_by(User.balance.desc())).scalars().all()
-        # Загружаем данные перед закрытием сессии
         users = [session.merge(u) for u in users]
         return users
     finally:
         session.close()
 
+def save_chat_sync(chat_id: int):
+    """Сохраняет ID чата для рассылки уведомлений."""
+    session = Session()
+    try:
+        chat = session.get(Chat, chat_id)
+        if chat is None:
+            chat = Chat(id=chat_id)
+            session.add(chat)
+            session.commit()
+        return True
+    finally:
+        session.close()
+
+def get_all_chats_sync():
+    """Получает все ID чатов для рассылки."""
+    session = Session()
+    try:
+        chats = session.execute(select(Chat.id)).scalars().all()
+        return chats
+    finally:
+        session.close()
+
+# --- Логика Выборов: Шаг 1 (Набор кандидатов) ---
+
+def start_candidate_registration():
+    """Начинает период регистрации кандидатов."""
+    global ELECTION_STATE
+    ELECTION_STATE = "CANDIDATE_REG"
+    logging.info("--- НАЧАЛО РЕГИСТРАЦИИ КАНДИДАТОВ ---")
+    
+    # 1. Сброс предыдущих кандидатов и голосов
+    session = Session()
+    try:
+        session.query(Candidate).delete()
+        session.query(User).filter(User.is_president == True).update({User.is_president: False, User.role: "Игрок"})
+        session.commit()
+    finally:
+        session.close()
+        
+    # 2. Планирование следующего шага
+    scheduler.add_job(
+        end_candidate_registration,
+        'date',
+        run_date=datetime.datetime.now() + datetime.timedelta(seconds=CANDIDATE_PERIOD_SECONDS)
+    )
+
+    # 3. Отправка уведомлений в чаты
+    asyncio.create_task(notify_chats_registration_start())
+
+async def notify_chats_registration_start():
+    """Отправляет уведомления о начале регистрации."""
+    chats = await asyncio.to_thread(get_all_chats_sync)
+    message_text = (
+        "📣 **НАЧАЛО ВЫБОРОВ!** 📣\n\n"
+        "Объявляется **Набор Кандидатов** на пост Президента.\n"
+        "Чтобы подать заявку, напишите команду: **`/candidate`**\n"
+        f"⏳ Набор продлится **{CANDIDATE_PERIOD_SECONDS // 60} минут**."
+    )
+    for chat_id in chats:
+        try:
+            await bot.send_message(chat_id, message_text, parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            logging.error(f"Не удалось отправить сообщение в чат {chat_id}: {e}")
+
+# --- Логика Выборов: Шаг 2 (Голосование) ---
+
+def end_candidate_registration():
+    """Завершает период регистрации и начинает голосование."""
+    global ELECTION_STATE
+    
+    # Получаем кандидатов
+    session = Session()
+    # Используем relationship для загрузки данных пользователя, связанных с кандидатом
+    candidates = session.execute(select(Candidate).options(relationship(Candidate.user))).scalars().all()
+    session.close()
+    
+    if not candidates:
+        ELECTION_STATE = "NONE"
+        asyncio.create_task(notify_chats_no_candidates())
+        logging.info("--- ВЫБОРЫ ОТМЕНЕНЫ (НЕТ КАНДИДАТОВ) ---")
+        return
+
+    ELECTION_STATE = "VOTING"
+    logging.info("--- НАЧАЛО ГОЛОСОВАНИЯ ---")
+    
+    # Планирование следующего шага
+    scheduler.add_job(
+        end_voting_and_announce_winner,
+        'date',
+        run_date=datetime.datetime.now() + datetime.timedelta(seconds=VOTING_PERIOD_SECONDS)
+    )
+
+    # Отправка уведомлений в чаты
+    asyncio.create_task(notify_chats_voting_start(candidates))
+
+async def notify_chats_no_candidates():
+    """Уведомление об отмене выборов."""
+    chats = await asyncio.to_thread(get_all_chats_sync)
+    message_text = "❌ **ВЫБОРЫ ОТМЕНЕНЫ.** Ни один кандидат не подал заявку."
+    for chat_id in chats:
+        try:
+            await bot.send_message(chat_id, message_text, parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            logging.error(f"Не удалось отправить сообщение об отмене в чат {chat_id}: {e}")
+
+async def notify_chats_voting_start(candidates):
+    """Отправляет уведомления о начале голосования."""
+    chats = await asyncio.to_thread(get_all_chats_sync)
+    
+    # Строим список кандидатов
+    candidate_list = "\n".join([f"👤 @{c.user.username}" for c in candidates])
+
+    message_text = (
+        "🗳️ **ГОЛОСОВАНИЕ НАЧАЛОСЬ!** 🗳️\n\n"
+        "**Кандидаты:**\n"
+        f"{candidate_list}\n\n"
+        "Чтобы проголосовать, используйте команду:\n"
+        "**`/vote [ID_пользователя]`**\n"
+        f"⏳ Голосование продлится **{VOTING_PERIOD_SECONDS // 60} минут**."
+    )
+    
+    builder = InlineKeyboardBuilder()
+    for candidate in candidates:
+        builder.button(text=f"Голосовать за @{candidate.user.username}", callback_data=f"vote_{candidate.user_id}")
+    builder.adjust(1) # Кнопки в столбик
+    
+    for chat_id in chats:
+        try:
+            await bot.send_message(chat_id, message_text, reply_markup=builder.as_markup(), parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            logging.error(f"Не удалось отправить сообщение о голосовании в чат {chat_id}: {e}")
+
+# --- Логика Выборов: Шаг 3 (Результаты) ---
+
+def end_voting_and_announce_winner():
+    """Завершает голосование и объявляет победителя."""
+    global ELECTION_STATE
+    ELECTION_STATE = "NONE"
+    
+    session = Session()
+    candidates = session.execute(select(Candidate).order_by(Candidate.votes.desc()).options(relationship(Candidate.user))).scalars().all()
+    session.close()
+    
+    if not candidates:
+        logging.info("--- ВЫБОРЫ ЗАВЕРШЕНЫ (СБОЙ) ---")
+        return
+
+    winner_candidate = candidates[0]
+    
+    # 1. Обновление статуса победителя
+    if winner_candidate:
+        asyncio.create_task(
+            asyncio.to_thread(
+                update_user_sync,
+                winner_candidate.user_id,
+                is_president=True,
+                role="Президент"
+            )
+        )
+        
+    # 2. Отправка уведомлений
+    asyncio.create_task(notify_chats_winner(candidates, winner_candidate))
+    logging.info(f"--- ПОБЕДИТЕЛЬ: {winner_candidate.user.username} с {winner_candidate.votes} голосами ---")
+
+async def notify_chats_winner(candidates, winner):
+    """Отправляет уведомления о результатах."""
+    chats = await asyncio.to_thread(get_all_chats_sync)
+    
+    # Составляем итоговый список голосов
+    results_list = "\n".join([f"👤 @{c.user.username}: **{c.votes} голосов**" for c in candidates])
+    
+    message_text = (
+        "👑 **ПРЕЗИДЕНТ ВЫБРАН!** 👑\n\n"
+        f"По итогам голосования, новым Президентом становится:\n"
+        f"**@{winner.user.username}** с численностью голосов **{winner.votes}**!\n\n"
+        "**Итоговые результаты:**\n"
+        f"{results_list}"
+    )
+    
+    for chat_id in chats:
+        try:
+            await bot.send_message(chat_id, message_text, parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            logging.error(f"Не удалось отправить сообщение о победителе в чат {chat_id}: {e}")
 
 # --- Хэндлеры для Игрового Функционала ---
+
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    # При /start профиль будет создан, если его нет, и чат сохранен
+    await asyncio.to_thread(
+        get_user_profile_sync,
+        message.from_user.id,
+        message.from_user.username or message.from_user.first_name
+    )
+    # Сохраняем ID чата для рассылки уведомлений
+    await asyncio.to_thread(save_chat_sync, message.chat.id)
+    
+    await message.answer("🎉 Добро пожаловать в BongoBot! 🎉\n\n"
+                         "Напиши /profile, чтобы увидеть свой счет.\n"
+                         "Используй /work, чтобы заработать денег.")
+
 
 @dp.message(Command("profile"))
 async def cmd_profile(message: types.Message):
@@ -137,7 +358,7 @@ async def cmd_profile(message: types.Message):
 async def cmd_work(message: types.Message):
     """Позволяет пользователю работать и зарабатывать деньги."""
     user_id = message.from_user.id
-    current_time = int(types.datetime.datetime.now().timestamp())
+    current_time = int(datetime.datetime.now().timestamp()) # ИСПРАВЛЕНО
     
     user_data = await asyncio.to_thread(
         get_user_profile_sync,
@@ -159,10 +380,12 @@ async def cmd_work(message: types.Message):
     money_earned = random.randint(50, 150)
     
     # Обновление данных (баланс и время работы)
+    new_balance = user_data.balance + money_earned 
+    
     user_data = await asyncio.to_thread(
         update_user_sync,
         user_id,
-        balance=user_data.balance + money_earned,
+        balance=new_balance,
         last_work_time=current_time
     )
 
@@ -191,10 +414,12 @@ async def cmd_buy_house(message: types.Message):
         )
 
     # Обновление данных (списываем деньги и добавляем имущество)
+    new_balance = user_data.balance - HOUSE_PRICE
+    
     user_data = await asyncio.to_thread(
         update_user_sync,
         user_id,
-        balance=user_data.balance - HOUSE_PRICE,
+        balance=new_balance,
         property_count=user_data.property_count + 1
     )
 
@@ -219,161 +444,128 @@ async def cmd_top(message: types.Message):
     
     await message.answer(top_list, parse_mode=ParseMode.MARKDOWN)
 
-
-# --- Система Выборов и Президентства ---
+# --- Системные и Админ-Команды ---
 
 @dp.message(Command("election"))
 async def cmd_election(message: types.Message):
-    """Начинает или завершает выборы, или показывает текущего президента."""
+    """Показывает текущее состояние выборов."""
     
-    # Получаем текущего президента
-    current_president = await asyncio.to_thread(
+    if ELECTION_STATE == "CANDIDATE_REG":
+        return await message.answer(f"⏳ **ВЫБОРЫ:** Сейчас идет **Набор Кандидатов** (до {CANDIDATE_PERIOD_SECONDS // 60} минут). Используйте `/candidate`.")
+    
+    if ELECTION_STATE == "VOTING":
+        return await message.answer(f"🗳️ **ВЫБОРЫ:** Идет **Голосование** (до {VOTING_PERIOD_SECONDS // 60} минут). Используйте `/vote [ID_кандидата]`.")
+
+    # Если выборы не идут, показываем текущего президента
+    president_user = await asyncio.to_thread(
         lambda: Session().execute(select(User).filter_by(is_president=True)).scalars().first()
     )
     
-    if not current_president:
-        # Если президента нет, начинаем выборы (для простоты - объявляем первого кандидата)
-        user_id = message.from_user.id
-        current_time = int(types.datetime.datetime.now().timestamp())
-        
-        user_data = await asyncio.to_thread(
-            get_user_profile_sync,
-            user_id,
-            message.from_user.username or message.from_user.first_name
-        )
+    if president_user:
+        return await message.answer(f"👑 Текущий Президент: **@{president_user.username}**.")
+    else:
+        return await message.answer("ℹ️ Президент не выбран. Администратор может начать выборы командой `/start_elections`.")
 
-        # Проверка кулдауна на выборы (чтобы не спамили)
-        time_elapsed = current_time - user_data.last_election_time
-        if time_elapsed < ELECTION_COOLDOWN_SECONDS:
-            remaining_time = ELECTION_COOLDOWN_SECONDS - time_elapsed
-            hours = remaining_time // 3600
-            return await message.answer(
-                f"❌ Вы можете баллотироваться или голосовать только раз в 24 часа. Осталось **{hours} ч**."
-            )
-            
-        # Устанавливаем текущего пользователя президентом
+
+@dp.message(Command("candidate"))
+async def cmd_candidate(message: types.Message):
+    """Подать заявку на пост президента."""
+    user_id = message.from_user.id
+    
+    if ELECTION_STATE != "CANDIDATE_REG":
+        return await message.answer("❌ Заявки можно подавать только во время **Набора Кандидатов**.")
+        
+    user_data = await asyncio.to_thread(
+        get_user_profile_sync,
+        user_id,
+        message.from_user.username or message.from_user.first_name
+    )
+
+    # Проверка кулдауна (чтобы один игрок голосовал/баллотировался раз в 24 часа)
+    current_time = int(datetime.datetime.now().timestamp())
+    time_elapsed = current_time - user_data.last_election_time
+    if time_elapsed < ELECTION_COOLDOWN_SECONDS:
+        hours = ELECTION_COOLDOWN_SECONDS // 3600
+        return await message.answer(f"❌ Вы можете участвовать в выборах или голосовать только раз в **{hours} часов**.")
+
+    # Проверка: не является ли уже кандидатом
+    session = Session()
+    # Ищем кандидата по user_id
+    existing_candidate = session.execute(select(Candidate).where(Candidate.user_id == user_id)).scalars().first()
+    session.close()
+    
+    if existing_candidate:
+        return await message.answer("❌ Вы уже зарегистрированы как кандидат.")
+
+    # Регистрация
+    session = Session()
+    try:
+        candidate = Candidate(user_id=user_id)
+        session.add(candidate)
+        
+        # Обновляем время участия игрока (кулдаун)
         await asyncio.to_thread(
             update_user_sync,
             user_id,
-            is_president=True,
-            last_election_time=current_time,
-            role="Президент"
+            last_election_time=current_time
         )
         
-        await message.answer(
-            f"🇺🇸 **ПОЗДРАВЛЯЕМ!** @{user_data.username} стал первым Президентом!\n"
-            f"Используйте /president_info для информации."
-        )
+        session.commit()
+        await message.answer("✅ **Поздравляем!** Ваша заявка принята. Ожидайте начала голосования.")
+    finally:
+        session.close()
 
-    else:
-        # Президент уже есть, просто показываем информацию
-        await message.answer(
-            f"🇺🇸 Текущий Президент: **@{current_president.username}**.\n"
-            f"Его баланс: **{current_president.balance:,} Bongo$**."
-        )
-
-
-# --- Админ-Панель ---
-
-@dp.message(Command("admin"))
-async def cmd_admin(message: types.Message):
-    """Вход в админ-панель."""
-    if message.from_user.id != ADMIN_ID:
-        return await message.answer("❌ У вас нет доступа к админ-панели.")
+@dp.message(Command("vote"))
+async def cmd_vote(message: types.Message, command: CommandObject):
+    """Отдать голос за кандидата."""
+    voter_id = message.from_user.id
     
-    admin_text = (
-        "👑 **АДМИН-ПАНЕЛЬ** 👑\n\n"
-        "Доступные команды:\n"
-        "/give [id] [сумма] - Выдать деньги игроку.\n"
-        "/set_president [id] - Назначить игрока Президентом.\n"
-        "/reset_db - Сбросить ВСЮ базу данных (используйте осторожно!)."
-    )
-    await message.answer(admin_text, parse_mode=ParseMode.MARKDOWN)
-
-
-@dp.message(Command("give"))
-async def cmd_give(message: types.Message, command: CommandObject):
-    """Выдача денег игроку (Только для админа)."""
-    if message.from_user.id != ADMIN_ID:
-        return await message.answer("❌ У вас нет доступа.")
+    if ELECTION_STATE != "VOTING":
+        return await message.answer("❌ Голосование открыто только в период **Голосования**.")
     
-    if not command.args or len(command.args.split()) != 2:
-        return await message.answer("Использование: /give [id] [сумма]")
-
-    try:
-        target_id = int(command.args.split()[0])
-        amount = int(command.args.split()[1])
-    except ValueError:
-        return await message.answer("ID и сумма должны быть числами.")
-        
-    user_data = await asyncio.to_thread(
-        update_user_sync,
-        target_id,
-        balance=lambda b: b + amount # SQLAlchemy примет функцию для обновления
-    )
-    
-    if user_data:
-        await message.answer(
-            f"✅ Игроку с ID `{target_id}` выдано **{amount:,} Bongo$**.\n"
-            f"Новый баланс: **{user_data.balance:,} Bongo$**",
-            parse_mode=ParseMode.MARKDOWN
-        )
-    else:
-        await message.answer(f"❌ Пользователь с ID {target_id} не найден.")
-
-
-@dp.message(Command("set_president"))
-async def cmd_set_president(message: types.Message, command: CommandObject):
-    """Назначение игрока президентом (Только для админа)."""
-    if message.from_user.id != ADMIN_ID:
-        return await message.answer("❌ У вас нет доступа.")
-
     if not command.args:
-        return await message.answer("Использование: /set_president [id]")
+        return await message.answer("Использование: /vote [ID_кандидата]")
 
     try:
-        target_id = int(command.args.split()[0])
+        candidate_id = int(command.args.split()[0])
     except ValueError:
-        return await message.answer("ID должен быть числом.")
+        return await message.answer("ID кандидата должен быть числом.")
 
-    # Сбрасываем текущего президента (если есть)
-    await asyncio.to_thread(
-        lambda: Session().execute(update(User).where(User.is_president==True).values(is_president=False))
+    # Проверка кулдауна голосующего
+    voter_data = await asyncio.to_thread(
+        get_user_profile_sync,
+        voter_id,
+        message.from_user.username or message.from_user.first_name
     )
+    current_time = int(datetime.datetime.now().timestamp())
+    time_elapsed = current_time - voter_data.last_election_time
+    if time_elapsed < ELECTION_COOLDOWN_SECONDS:
+        return await message.answer("❌ Вы уже участвовали в выборах или голосовали. Вы сможете снова голосовать через 24 часа.")
 
-    # Назначаем нового президента
-    user_data = await asyncio.to_thread(
-        update_user_sync,
-        target_id,
-        is_president=True,
-        role="Президент"
-    )
+    # Проверка: существует ли кандидат (ищем по user_id)
+    session = Session()
+    candidate_record = session.execute(select(Candidate).where(Candidate.user_id == candidate_id)).scalars().first()
+    
+    if candidate_record is None:
+        session.close()
+        return await message.answer(f"❌ Кандидат с ID `{candidate_id}` не найден.")
+    
+    # Проверка: нельзя голосовать за себя (хотя это косвенно запрещает кулдаун, лучше перестраховаться)
+    if candidate_id == voter_id:
+        session.close()
+        return await message.answer("❌ Вы не можете голосовать за себя.")
 
-    if user_data:
-        await message.answer(
-            f"🇺🇸 **@{user_data.username}** назначен новым Президентом!"
+    # Увеличение голоса и обновление кулдауна
+    try:
+        candidate_record.votes += 1
+        
+        # Обновляем время участия игрока (кулдаун)
+        await asyncio.to_thread(
+            update_user_sync,
+            voter_id,
+            last_election_time=current_time
         )
-    else:
-        await message.answer(f"❌ Пользователь с ID {target_id} не найден.")
-
-
-# --- Базовая команда /start ---
-
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer("🎉 Добро пожаловать в BongoBot! 🎉\n\n"
-                         "Напиши /profile, чтобы увидеть свой счет.\n"
-                         "Используй /work, чтобы заработать денег.")
-
-
-# --- Запуск Бота ---
-
-async def main():
-    print("Бот запускается...")
-    # Создание папки data, если ее нет (критично для SQLite на Bothost.ru)
-    os.makedirs('data', exist_ok=True)
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        
+        session.commit()
+        await message.answer(f"✅ Вы успешно отдали свой голос за кандидата с ID `{candidate_id}`.")
+   
