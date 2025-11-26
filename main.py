@@ -1,39 +1,3 @@
-import asyncio
-import os
-import logging
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-# --- Импорты для SQLite ---
-from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Boolean
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.future import select
-# --------------------------
-
-# Включаем логирование
-logging.basicConfig(level=logging.INFO)
-
-# --- Настройка Базы Данных (SQLite с сохранением) ---
-# Bothost сохраняет данные только в папке /app/data/
-# Поэтому БД должна быть: /app/data/bongobot.db
-DB_PATH = "sqlite:///data/bongobot.db" 
-
-# Базовый класс для всех моделей
-Base = declarative_base()
-
-# Определяем, как будет выглядеть таблица "users" (Профиль игрока)
-class User(Base):
-    __tablename__ = 'users'
-    id = Column(BigInteger, primary_key=True, autoincrement=False) # ID Телеграма
-    username = Column(String)
-    role = Column(String, default="Игрок")
-    is_owner = Column(Boolean, default=False)
-    balance = Column(Integer, default=500)
-    property_count = Column(Integer, default=0) 
-    xp = Column(Integer, default=0)
-    is_president = Column(Boolean, default=False)
-
-# Создаем движок
 # check_same_thread=False нужен для асинхронной работы с SQLite
 engine = create_engine(DB_PATH, connect_args={"check_same_thread": False})
 Base.metadata.create_all(engine) # Создаем таблицу, если ее нет
