@@ -19,12 +19,13 @@ dp = Dispatcher()
 async def cmd_start(message: types.Message):
     await message.answer("Йо! BongoBot на связи! 🦍\nЯ работаю на сервере Scalingo.")
 
-    # --- Функция запуска ---
-    async def main():
-        print("Бот запускается...")
-            # Удаляем вебхуки и запускаем опрос
-                await bot.delete_webhook(drop_pending_updates=True)
-                    await dp.start_polling(bot)
+# --- Функция запуска (начинается с края, не внутри других функций!) ---
+async def main():
+    print("Бот запускается...")
+    # Удаляем вебхуки и запускаем опрос
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
 
-                    if __name__ == "__main__":
-                        asyncio.run(main())
+# --- Блок запуска скрипта (начинается с края) ---
+if __name__ == "__main__":
+    asyncio.run(main())
