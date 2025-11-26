@@ -15,7 +15,6 @@ logging.basicConfig(level=logging.INFO)
 
 # --- Настройка Базы Данных (SQLite с сохранением) ---
 # Bothost сохраняет данные только в папке /app/data/
-# Поэтому БД должна быть: /app/data/bongobot.db
 DB_PATH = "sqlite:///data/bongobot.db" 
 
 # Базовый класс для всех моделей
@@ -100,51 +99,7 @@ async def cmd_profile(message: types.Message):
     await message.answer(profile_text, parse_mode='Markdown')
 
 
-# --- Оставшаяся часть кода остается прежней ---
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer("БонгоБот на связи! Напиши /profile, чтобы увидеть свой счет.")
-
-
-async def main():
-    print("Бот запускается...")
-    # Создание папки data, если ее нет (на всякий случай)
-    os.makedirs('data', exist_ok=True)
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())        return user
-    finally:
-        session.close()
-
-# --- Хэндлер: Команда /profile ---
-@dp.message(Command("profile"))
-async def cmd_profile(message: types.Message):
-    user_data = await asyncio.to_thread(
-        get_user_profile_sync,
-        message.from_user.id,
-        message.from_user.username or message.from_user.first_name
-    )
-
-    role_prefix = ""
-    if user_data.is_owner:
-        role_prefix = "👑 ВЛАДЕЛЕЦ 👑 "
-    elif user_data.is_president:
-        role_prefix = "🇺🇸 ПРЕЗИДЕНТ 🇺🇸 "
-    
-    profile_text = (
-        f"{role_prefix}@{user_data.username}\n\n"
-        f"💰 Баланс: **{user_data.balance:,} Bongo$**\n"
-        f"💼 Должность: {user_data.role}\n"
-        f"✨ Опыт (XP): {user_data.xp}\n"
-        f"🏡 Имущество: {user_data.property_count} объектов"
-    )
-    
-    await message.answer(profile_text, parse_mode='Markdown')
-
-
-# --- Оставшаяся часть кода остается прежней ---
+# --- Хэндлер: Команда /start ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer("БонгоБот на связи! Напиши /profile, чтобы увидеть свой счет.")
