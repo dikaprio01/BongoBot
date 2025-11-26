@@ -1,4 +1,4 @@
-import datetime # ИСПРАВЛЕНО
+import datetime
 import asyncio
 import os
 import logging
@@ -9,7 +9,7 @@ from aiogram.enums import ParseMode
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Boolean, update, select, ForeignKey
-from sqlalchemy.orm import declarative_base, sessionmaker, relationship # ФИКС: Исправлено предупреждение SQLAlchemy
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship 
 from sqlalchemy.future import select
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -144,8 +144,7 @@ def get_all_chats_sync():
         return chats
     finally:
         session.close()
-
-# --- Логика Выборов: Шаг 1 (Набор кандидатов) ---
+        # --- Логика Выборов: Шаг 1 (Набор кандидатов) ---
 
 def start_candidate_registration():
     """Начинает период регистрации кандидатов."""
@@ -358,7 +357,7 @@ async def cmd_profile(message: types.Message):
 async def cmd_work(message: types.Message):
     """Позволяет пользователю работать и зарабатывать деньги."""
     user_id = message.from_user.id
-    current_time = int(datetime.datetime.now().timestamp()) # ИСПРАВЛЕНО
+    current_time = int(datetime.datetime.now().timestamp()) 
     
     user_data = await asyncio.to_thread(
         get_user_profile_sync,
@@ -568,4 +567,165 @@ async def cmd_vote(message: types.Message, command: CommandObject):
         
         session.commit()
         await message.answer(f"✅ Вы успешно отдали свой голос за кандидата с ID `{candidate_id}`.")
-   
+    finally:
+        session.close()
+
+@dp.message(Command("start_elections"))
+async def cmd_start_elections(message: types.Message):
+    """Админ начинает выборы."""
+    if message.from_user.id != ADMIN_ID:
+        return await message.answer("❌ У вас нет доступа.")
+    
+    if ELECTION_STATE != "NONE":
+        return await message.answer(f"❌ Выборы уже идут. Текущий этап: **{ELECTION_STATE}**.")
+
+    # Запуск логики выборов
+    start_candidate_registration()
+    await message.answer("✅ **Выборы запущены!** Объявлен **Набор Кандидатов**.")
+
+@dp.message(Command("admin"))
+async def cmd_admin(message: types.Message):
+    """Вход в админ-панель."""
+    if message.from_user.id != ADMIN_ID:
+        return await message.answer("❌ У вас нет доступа к админ-панели.")
+    
+    admin_text = (
+        "👑 **АДМИН-ПАНЕЛЬ** 👑\n\n"
+        "Доступные команды:\n"
+        "/give [id] [сумма] - Выдать деньги игроку.\n"
+        "/set_president [id] - Назначить игрока Президентом.\n"
+        "/reset_db - Сбросить ВСЮ базу данных (используйте осторожно!).\n"
+        "/start_elections - Начать выборы."
+    )
+    await message.answer(admin_text, parse_mode=ParseMode.MARKDOWN)
+
+
+@dp.message(Command("give"))
+async def cmd_give(message: types.Message, command: CommandObject):
+    """Выдача денег игроку (Только для админа)."""
+    if message.from_user.id != ADMIN_ID:
+        return await message.answer("❌ У вас нет доступа.")
+    
+    if not command.args or len(command.args.split()) != 2:
+        return await message.answer("Использование: /give [id] [сумма]")
+
+    try:
+        target_id = int(command.args.split()[0])
+        amount = int(command.args.split()[1])
+    except ValueError:
+        return await message.answer("ID и сумма должны быть числами.")
+        
+    # 1. Получаем текущие данные (или создаем профиль)
+    current_user_data = await asyncio.to_thread(
+        get_user_profile_sync,
+        target_id,
+        "UnknownUser" 
+    )
+    
+    if current_user_data is None:
+        return await message.answer(f"❌ Пользователь с ID {target_id} не найден.")
+
+    # 2. Считаем новый баланс (ЧИСЛО)
+    new_balance = current_user_data.balance + amount
+        
+    # 3. Обновление: передаем ЧИСЛО в БД
+    await asyncio.to_thread(
+        update_user_sync,
+        target_id,
+        balance=new_balance
+    )
+
+    # 4. ФИКС: Повторное получение данных для вывода, чтобы избежать DetachedInstanceError
+    user_data = await asyncio.to_thread(
+        get_user_profile_sync,
+        target_id,
+        "UnknownUser" 
+    )
+
+    
+    if user_data:
+        await message.answer(
+            f"✅ Игроку с ID `{target_id}` выдано **{amount:,} Bongo$**.\n"
+            f"Новый баланс: **{user_data.balance:,} Bongo$**",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        await message.answer(f"❌ Произошла ошибка при получении данных после выдачи.")
+
+
+@dp.message(Command("set_president"))
+async def cmd_set_president(message: types.Message, command: CommandObject):
+    """Назначение игрока президентом (Только для админа)."""
+    if message.from_user.id != ADMIN_ID:
+        return await message.answer("❌ У вас нет доступа.")
+
+    if not command.args:
+        return await message.answer("Использование: /set_president [id]")
+
+    try:
+        target_id = int(command.args.split()[0])
+    except ValueError:
+        return await message.answer("ID должен быть числом.")
+
+    # 1. Сбрасываем текущего президента (если есть)
+    await asyncio.to_thread(
+        lambda: Session().execute(update(User).where(User.is_president==True).values(is_president=False, role="Игрок")).commit()
+    )
+
+    # 2. Назначаем нового президента
+    user_data = await asyncio.to_thread(
+        update_user_sync,
+        target_id,
+        is_president=True,
+        role="Президент"
+    )
+
+    if user_data:
+        await message.answer(
+            f"🇺🇸 **@{user_data.username}** назначен новым Президентом!"
+        )
+    else:
+        await message.answer(f"❌ Пользователь с ID {target_id} не найден. Сначала попросите его написать /start.")
+
+
+@dp.message(Command("reset_db"))
+async def cmd_reset_db(message: types.Message):
+    """Сбрасывает всю базу данных (ТОЛЬКО ДЛЯ АДМИНА!)."""
+    if message.from_user.id != ADMIN_ID:
+        return await message.answer("❌ У вас нет доступа.")
+
+    DB_FILE = "data/bongobot.db"
+    
+    if os.path.exists(DB_FILE):
+        try:
+            os.remove(DB_FILE)
+            # Пересоздаем пустую БД с новой структурой
+            # Важно: нужно заново создать Engine и Session, чтобы он увидел новый пустой файл
+            global engine, Base, Session
+            engine = create_engine(DB_PATH, connect_args={"check_same_thread": False})
+            Base.metadata.create_all(engine) 
+            Session = sessionmaker(bind=engine)
+            
+            await message.answer("⚠️ **База данных успешно сброшена!** Файл `bongobot.db` удален и создан заново. **Перезапустите бота.**", parse_mode=ParseMode.MARKDOWN)
+        except Exception as e:
+            await message.answer(f"❌ Ошибка при сбросе БД: {e}")
+    else:
+        await message.answer("ℹ️ Файл базы данных `bongobot.db` не найден. Сброс не требуется.")
+
+
+# --- Запуск Бота и Планировщика ---
+
+async def main():
+    print("Бот запускается...")
+    # Создание папки data, если ее нет
+    os.makedirs('data', exist_ok=True)
+    
+    # Запуск планировщика
+    scheduler.start() 
+    
+    # Удаление вебхука и запуск
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
