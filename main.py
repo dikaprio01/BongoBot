@@ -8,6 +8,9 @@ from aiogram.filters import Command, CommandObject
 from aiogram.enums import ParseMode
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+# !!! ИСПРАВЛЕНИЕ #1: Импортируем 'select' из SQLAlchemy для использования в cmd_profile
+from sqlalchemy import select 
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Импортируем все модели и синхронные функции из новых файлов
@@ -19,7 +22,10 @@ from db_sync import (
     get_all_users_sync,
     save_chat_sync,
     get_all_chats_sync,
-    apply_tax_sync
+    apply_tax_sync,
+    # !!! ИСПРАВЛЕНИЕ #2: Импортируем Session в НАЧАЛЕ ФАЙЛА, чтобы избежать 
+    # ошибки 'attempted relative import' внутри функций.
+    Session 
 )
 
 # --- Константы и Настройки ---
@@ -75,17 +81,9 @@ scheduler = AsyncIOScheduler()
 
 async def business_payout_job():
     """Запускается каждый час для выплаты дохода владельцам бизнесов."""
-    # Обращение к БД за Бизнесами происходит внутри db_sync.py, но мы 
-    # реализуем логику выплаты здесь, чтобы использовать бот для уведомлений.
     
-    # ПЕРЕПИСЫВАЕМ ЛОГИКУ ВЫПЛАТЫ для новой структуры
-    # Чтобы избежать дублирования кода и проблем с сессиями,
-    # мы будем использовать чистый запрос с подсчетом.
-    
-    # Этот код требует, чтобы мы могли получить все бизнесы и их владельцев.
-    # Для простоты, оставим рабочую логику как была, но без прямого импорта Session.
-
-    from .db_sync import Session 
+    # !!! ИСПРАВЛЕНИЕ: Удаляем относительный импорт, так как Session импортирована выше
+    # from .db_sync import Session 
     if not Session: return 
 
     session = Session()
@@ -105,6 +103,7 @@ async def business_payout_job():
 
         for user_id, amount in payouts.items():
             await asyncio.to_thread(
+                # User.balance доступен, так как User импортирован выше
                 lambda uid, amt: update_user_sync(uid, balance=User.balance + amt),
                 user_id, amount
             )
@@ -165,11 +164,16 @@ async def cmd_profile(message: types.Message):
     )
     
     # Получение информации о бизнесах
-    from .db_sync import Session
+    # !!! ИСПРАВЛЕНИЕ: Удаляем относительный импорт, так как Session импортирована выше
+    # from .db_sync import Session
+    
     if not Session: return
     session = Session()
-    owned_businesses = session.execute(select(OwnedBusiness).filter_by(user_id=user_id)).scalars().all()
-    session.close()
+    try:
+        # select импортирован в начале файла
+        owned_businesses = session.execute(select(OwnedBusiness).filter_by(user_id=user_id)).scalars().all()
+    finally:
+        session.close()
     
     total_hourly_income = sum(
         BUSINESSES.get(b.business_id)['hourly_income'] * b.count 
@@ -178,7 +182,9 @@ async def cmd_profile(message: types.Message):
     )
     
     business_text = "\n".join(
-        [f"   💼 {b.name}: {b.count} шт." for b in owned_businesses]
+        [f"   💼 {BUSINESSES.get(b.business_id)['name']}: {b.count} шт." 
+         for b in owned_businesses 
+         if BUSINESSES.get(b.business_id)]
     ) if owned_businesses else "   (Нет)"
 
     role_prefix = ""
@@ -215,6 +221,7 @@ async def main():
     print("Бот запускается...")
     
     # 1. Инициализация БД
+    # !!! ИСПРАВЛЕНИЕ #3: Убираем DB_PATH, чтобы избежать ошибки TypeError
     if not init_db():
         print("FATAL: Database initialization failed. Exiting.")
         return
