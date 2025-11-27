@@ -3,13 +3,12 @@ import os
 import logging
 import random
 import datetime
-from datetime import datetime, timedelta # <--- timedelta теперь здесь
+from datetime import datetime, timedelta 
 from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Boolean, DateTime, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import declarative_base
 
-from aiogram import Bot, Dispatcher, types
-from aiogram.utils import executor
+from aiogram import Bot, Dispatcher, types, executor # <-- ИСПРАВЛЕНО: executor импортируется напрямую
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -21,7 +20,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 BOT_TOKEN = os.environ.get("BOT_TOKEN") 
 
 # ID владельца бота (Замени на свой Telegram ID)
-ADMIN_ID = 8515658919 
+ADMIN_ID = 1871352653 
 
 # Настройки работы
 WORK_COOLDOWN = timedelta(hours=8)
@@ -268,6 +267,7 @@ async def on_startup(dp):
         scheduler.add_job(business_payout_job, 'interval', hours=1, id='business_payout_job')
         scheduler.start()
     else:
+
         print("Планировщик не запущен из-за ошибки БД.")
 
 if __name__ == '__main__':
@@ -275,3 +275,4 @@ if __name__ == '__main__':
         raise ValueError("BOT_TOKEN не найден. Установите переменную окружения.")
         
     executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
+
