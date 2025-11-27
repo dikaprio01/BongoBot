@@ -1,5 +1,5 @@
-aiogram==3.10.0
-python-dotenv
-SQLAlchemy==2.0.30
+aiogram
+SQLAlchemy
 apscheduler
 psycopg2-binary
+python-dotenv
