@@ -155,7 +155,7 @@ async def send_welcome(message: types.Message):
         username=message.from_user.username,
         admin_id=ADMIN_ID
     )
-    keyboard = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    keyboard = types.ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
     keyboard.row(WORK_BUTTON, BUSINESS_BUTTON)
 
     await message.reply(
