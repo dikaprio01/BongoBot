@@ -215,7 +215,7 @@ async def main():
     print("Бот запускается...")
     
     # 1. Инициализация БД
-    if not init_db(DB_PATH):
+    if not init_db():
         print("FATAL: Database initialization failed. Exiting.")
         return
 
