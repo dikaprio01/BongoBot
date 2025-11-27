@@ -8,9 +8,9 @@ from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Boole
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import declarative_base
 
-from aiogram import Bot, Dispatcher, types, F # <-- ДОБАВЛЕНО F для фильтров
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters import Command # <-- ДОБАВЛЕНО для команд
+from aiogram import Bot, Dispatcher, types, F 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton # <-- ИСПРАВЛЕНО
+from aiogram.filters import Command 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncio 
 
@@ -146,7 +146,6 @@ async def business_payout_job():
     logging.info("Выполняется работа планировщика: Выплата по бизнесам.")
     pass 
 
-# ИСПРАВЛЕНО: @dp.message_handler(commands=['start'])
 @dp.message(Command("start")) 
 async def send_welcome(message: types.Message):
     save_chat_sync(message.chat.id)
@@ -155,8 +154,15 @@ async def send_welcome(message: types.Message):
         username=message.from_user.username,
         admin_id=ADMIN_ID
     )
-    keyboard = types.ReplyKeyboardMarkup(keyboard=[], resize_keyboard=True)
-    keyboard.row(WORK_BUTTON, BUSINESS_BUTTON)
+    
+    # ИСПРАВЛЕНО: Создаем кнопки и передаем их списком списков в конструктор ReplyKeyboardMarkup (v3)
+    button_work = KeyboardButton(text=WORK_BUTTON)
+    button_business = KeyboardButton(text=BUSINESS_BUTTON)
+    
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[[button_work, button_business]], 
+        resize_keyboard=True
+    )
 
     await message.reply(
         f"Добро пожаловать в BongoBot, **{user.username}**!\n"
@@ -164,7 +170,6 @@ async def send_welcome(message: types.Message):
         reply_markup=keyboard
     )
 
-# ИСПРАВЛЕНО: @dp.message_handler(text=WORK_BUTTON)
 @dp.message(F.text == WORK_BUTTON)
 async def work_handler(message: types.Message):
     telegram_id = message.from_user.id
@@ -196,7 +201,6 @@ async def work_handler(message: types.Message):
         f"Твой новый баланс: {new_balance} $."
     )
 
-# ИСПРАВЛЕНО: @dp.message_handler(text=BUSINESS_BUTTON)
 @dp.message(F.text == BUSINESS_BUTTON)
 async def businesses_handler(message: types.Message):
     text = "🏢 **Доступные бизнесы для покупки:**\n\n"
@@ -208,7 +212,9 @@ async def businesses_handler(message: types.Message):
             f"   💰 Цена: {biz_info['cost']} $\n"
             f"   💸 Доход: {biz_info['base_profit']} $ каждые {int(biz_info['cooldown'].total_seconds() // 3600)} ч.\n"
         )
-        keyboard.add(
+        # NOTE: InlineKeyboardMarkup не менялась в v3, тут row_width=1 сработает, но InlineKeyboardButton.row/add не поддерживаются.
+        # Здесь мы используем метод .add(), который, к счастью, работает в InlineKeyboardMarkup в v3.
+        keyboard.add( 
             InlineKeyboardButton(
                 f"Купить {biz_info['name']} ({biz_info['cost']} $)",
                 callback_data=f"buy_biz_{biz_id}"
@@ -217,7 +223,6 @@ async def businesses_handler(message: types.Message):
     await message.reply(text, reply_markup=keyboard)
 
 
-# ИСПРАВЛЕНО: @dp.callback_query_handler(lambda c: c.data and c.data.startswith('buy_biz_'))
 @dp.callback_query(F.data.startswith('buy_biz_'))
 async def process_callback_buy_biz(callback_query: types.CallbackQuery):
     telegram_id = callback_query.from_user.id
@@ -268,10 +273,8 @@ async def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN не найден. Установите переменную окружения.")
         
-    # Регистрируем обработчик on_startup (v3)
     dp.startup.register(on_startup_action)
     
-    # Запускаем polling (новый метод aiogram v3)
     await dp.start_polling(bot, skip_updates=True)
 
 
