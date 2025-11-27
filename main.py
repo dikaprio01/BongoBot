@@ -11,8 +11,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Импортируем все модели и синхронные функции из новых файлов
-from .db_models import User, Candidate, OwnedBusiness 
-from .db_sync import (
+from db_models import User, Candidate, OwnedBusiness 
+from db_sync import (
     init_db,
     get_user_profile_sync,
     update_user_sync,
