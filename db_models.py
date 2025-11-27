@@ -2,7 +2,7 @@
 
 from sqlalchemy import Column, Integer, String, BigInteger, Boolean, DateTime
 from sqlalchemy.orm import declarative_base
-
+import datetime
 # 1. Базовый класс для всех моделей (нужен для Base.metadata.create_all)
 Base = declarative_base()
 
