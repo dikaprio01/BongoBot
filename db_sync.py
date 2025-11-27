@@ -1,7 +1,8 @@
 # db_sync.py
 import os
 import datetime
-from sqlalchemy import create_engine, select, Column, Integer, String, BigInteger, Boolean, DateTime
+# !!! ИСПРАВЛЕНИЕ #1: Добавляем 'text' из SQLAlchemy для явной проверки связи с БД
+from sqlalchemy import create_engine, select, Column, Integer, String, BigInteger, Boolean, DateTime, text 
 from sqlalchemy.orm import sessionmaker
 
 # 1. Импорт моделей БЕЗ ТОЧЕК!
@@ -28,12 +29,18 @@ SessionLocal = Session # Добавим SessionLocal, на случай если
 # 5. Функция инициализации (создает таблицы)
 def init_db():
     try:
+        # !!! ИСПРАВЛЕНИЕ #2: Явная проверка подключения (ping)
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+            print("БД: Подключение успешно установлено.")
+        
         # Создает все таблицы, определенные в Base
         Base.metadata.create_all(bind=engine)
+        print("БД: Таблицы успешно созданы (или уже существовали).")
         return True
     except Exception as e:
-        # В реальной жизни нужно логировать, но для старта пока оставим print
-        print(f"Ошибка инициализации БД: {e}") 
+        # Теперь эта ошибка выведет причину в логах Railway!
+        print(f"FATAL: Ошибка инициализации БД. Таблицы НЕ созданы: {e}") 
         return False
 
 # 6. Функция для получения пользователя (пример)
