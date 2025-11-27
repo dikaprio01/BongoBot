@@ -8,9 +8,10 @@ from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Boole
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import declarative_base
 
-from aiogram import Bot, Dispatcher, types, executor # <-- ИСПРАВЛЕНО: executor импортируется напрямую
+from aiogram import Bot, Dispatcher, types # <-- ИСПРАВЛЕНО: executor удален
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import asyncio # <-- ДОБАВЛЕНО для запуска (polling)
 
 # =========================================================
 # === 1. НАСТРОЙКИ (ВМЕСТО config.py) ===
@@ -87,10 +88,8 @@ class Chat(Base):
 # =========================================================
 
 DB_PATH = os.environ.get("DATABASE_URL") 
-# Замена "postgres://" на "postgresql://" для SQLAlchemy
 if DB_PATH and DB_PATH.startswith("postgres://"):
     DB_PATH = DB_PATH.replace("postgres://", "postgresql://", 1)
-# Запасной вариант
 if not DB_PATH:
     DB_PATH = "sqlite:///data/bongobot.db"
 
@@ -99,7 +98,6 @@ Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db():
     try:
-        # Проверка, что модели загружены
         if not Base.metadata.tables:
             print("FATAL-DEBUG: Base.metadata пуст! Модели не определены.")
             return False
@@ -260,19 +258,34 @@ async def process_callback_buy_biz(callback_query: types.CallbackQuery):
 
 # --- 5. ЗАПУСК ---
 
-async def on_startup(dp):
+async def on_startup_action(): # Асинхронная функция запуска
     print("Бот запускается...")
     
     if init_db():
         scheduler.add_job(business_payout_job, 'interval', hours=1, id='business_payout_job')
         scheduler.start()
     else:
-
         print("Планировщик не запущен из-за ошибки БД.")
 
-if __name__ == '__main__':
+async def main():
     if not BOT_TOKEN:
         raise ValueError("BOT_TOKEN не найден. Установите переменную окружения.")
         
-    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
+    # Запускаем действие при старте
+    await on_startup_action()
+    
+    # Запускаем polling (новый метод aiogram v3)
+    # NOTE: В aiogram v2 это executor.start_polling, в v3 это dp.start_polling
+    try:
+        await dp.start_polling(bot, skip_updates=True)
+    except TypeError:
+        # Если Railway все-таки вернул aiogram v2, используем executor
+        # Но мы удалили executor. В случае ошибки нужно будет откатить код.
+        # Пока полагаемся на v3.
+        # Если здесь будет ошибка, скорее всего, dp.start_polling(bot) не сработал.
+        raise Exception("Ошибка запуска. Возможно, aiogram v3 не полностью установлен или требуется ручной запуск (как в v2).")
 
+
+if __name__ == '__main__':
+    # Используем стандартный запуск asyncio
+    asyncio.run(main())
