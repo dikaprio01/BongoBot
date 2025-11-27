@@ -146,7 +146,7 @@ def save_chat_sync(chat_id: int):
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
 async def business_payout_job():
