@@ -5,7 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.future import select
 from sqlalchemy.exc import SQLAlchemyError
 
-from .db_models import Base, User, Candidate, OwnedBusiness, Chat # Импортируем модели
+from db_models import Base, User, Candidate, OwnedBusiness, Chat # Импортируем модели
 
 # --- НАСТРОЙКА БД ---
 # ВАЖНО: Эти переменные будут инициализированы в main.py
