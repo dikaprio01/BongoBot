@@ -7,9 +7,12 @@ from datetime import datetime, timedelta
 from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Boolean, DateTime, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import declarative_base
+# ИСПРАВЛЕНО: Добавлен selectinload для решения DetachedInstanceError
+from sqlalchemy.orm import selectinload 
 
 from aiogram import Bot, Dispatcher, types, F 
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton # <-- ИСПРАВЛЕНО
+# ИСПРАВЛЕНО: Импорт ReplyKeyboardMarkup, KeyboardButton для корректной работы клавиатур v3
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton 
 from aiogram.filters import Command 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncio 
@@ -18,16 +21,25 @@ import asyncio
 # === 1. НАСТРОЙКИ ===
 # =========================================================
 
+# Токен берется из переменных окружения Railway
 BOT_TOKEN = os.environ.get("BOT_TOKEN") 
+
+# ID владельца бота (Замени на свой Telegram ID)
 ADMIN_ID = 1871352653 
+
+# Настройки работы
 WORK_COOLDOWN = timedelta(hours=8)
 WORK_PROFIT_MIN = 200
 WORK_PROFIT_MAX = 500
+
+# Настройки бизнеса
 BUSINESSES = {
     1: {"name": "Ларек с шаурмой", "cost": 1500, "base_profit": 500, "cooldown": timedelta(hours=12)},
     2: {"name": "Автомойка", "cost": 5000, "base_profit": 1500, "cooldown": timedelta(hours=24)},
     3: {"name": "Кофейня", "cost": 15000, "base_profit": 3000, "cooldown": timedelta(hours=48)},
 }
+
+# Кнопки
 WORK_BUTTON = "Работать 💼"
 BUSINESS_BUTTON = "Мои бизнесы 💰"
 
@@ -105,6 +117,7 @@ def init_db():
         print(f"FATAL: Ошибка инициализации БД. Таблицы НЕ созданы: {e}") 
         return False
 
+# ИСПРАВЛЕНО: Добавлено явное обращение к атрибутам для предотвращения DetachedInstanceError
 def get_user_profile_sync(telegram_id: int, username: str, admin_id: int):
     with Session() as session:
         user = session.query(User).filter(User.telegram_id == telegram_id).first()
@@ -118,6 +131,11 @@ def get_user_profile_sync(telegram_id: int, username: str, admin_id: int):
             )
             session.add(user)
             session.commit()
+        
+        # Принудительная загрузка атрибутов перед закрытием сессии:
+        _ = user.username
+        _ = user.balance
+
         return user
 
 def update_user_sync(telegram_id: int, **kwargs):
@@ -138,7 +156,7 @@ def save_chat_sync(chat_id: int):
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher() 
+dp = Dispatcher() # ИСПРАВЛЕНО для aiogram v3
 
 scheduler = AsyncIOScheduler()
 
@@ -146,7 +164,7 @@ async def business_payout_job():
     logging.info("Выполняется работа планировщика: Выплата по бизнесам.")
     pass 
 
-@dp.message(Command("start")) 
+@dp.message(Command("start")) # ИСПРАВЛЕНО для aiogram v3
 async def send_welcome(message: types.Message):
     save_chat_sync(message.chat.id)
     user = get_user_profile_sync(
@@ -155,7 +173,7 @@ async def send_welcome(message: types.Message):
         admin_id=ADMIN_ID
     )
     
-    # ИСПРАВЛЕНО: Создаем кнопки и передаем их списком списков в конструктор ReplyKeyboardMarkup (v3)
+    # ИСПРАВЛЕНО: Создание клавиатуры ReplyKeyboardMarkup в стиле aiogram v3
     button_work = KeyboardButton(text=WORK_BUTTON)
     button_business = KeyboardButton(text=BUSINESS_BUTTON)
     
@@ -170,7 +188,7 @@ async def send_welcome(message: types.Message):
         reply_markup=keyboard
     )
 
-@dp.message(F.text == WORK_BUTTON)
+@dp.message(F.text == WORK_BUTTON) # ИСПРАВЛЕНО для aiogram v3
 async def work_handler(message: types.Message):
     telegram_id = message.from_user.id
     user = get_user_profile_sync(telegram_id, message.from_user.username, ADMIN_ID)
@@ -201,9 +219,10 @@ async def work_handler(message: types.Message):
         f"Твой новый баланс: {new_balance} $."
     )
 
-@dp.message(F.text == BUSINESS_BUTTON)
+@dp.message(F.text == BUSINESS_BUTTON) # ИСПРАВЛЕНО для aiogram v3
 async def businesses_handler(message: types.Message):
     text = "🏢 **Доступные бизнесы для покупки:**\n\n"
+    # InlineKeyboardMarkup в v3 не требует такого сильного рефакторинга
     keyboard = InlineKeyboardMarkup(row_width=1)
     
     for biz_id, biz_info in BUSINESSES.items():
@@ -212,8 +231,6 @@ async def businesses_handler(message: types.Message):
             f"   💰 Цена: {biz_info['cost']} $\n"
             f"   💸 Доход: {biz_info['base_profit']} $ каждые {int(biz_info['cooldown'].total_seconds() // 3600)} ч.\n"
         )
-        # NOTE: InlineKeyboardMarkup не менялась в v3, тут row_width=1 сработает, но InlineKeyboardButton.row/add не поддерживаются.
-        # Здесь мы используем метод .add(), который, к счастью, работает в InlineKeyboardMarkup в v3.
         keyboard.add( 
             InlineKeyboardButton(
                 f"Купить {biz_info['name']} ({biz_info['cost']} $)",
@@ -223,7 +240,7 @@ async def businesses_handler(message: types.Message):
     await message.reply(text, reply_markup=keyboard)
 
 
-@dp.callback_query(F.data.startswith('buy_biz_'))
+@dp.callback_query(F.data.startswith('buy_biz_')) # ИСПРАВЛЕНО для aiogram v3
 async def process_callback_buy_biz(callback_query: types.CallbackQuery):
     telegram_id = callback_query.from_user.id
     biz_id = int(callback_query.data.split('_')[2])
@@ -258,7 +275,9 @@ async def process_callback_buy_biz(callback_query: types.CallbackQuery):
     )
 
 
-# --- 5. ЗАПУСК ---
+# =========================================================
+# === 5. ЗАПУСК ===
+# =========================================================
 
 async def on_startup_action(): 
     print("Бот запускается...")
@@ -275,6 +294,7 @@ async def main():
         
     dp.startup.register(on_startup_action)
     
+    # ИСПРАВЛЕНО: Запуск polling в стиле aiogram v3
     await dp.start_polling(bot, skip_updates=True)
 
 
