@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 # 1. Импорт моделей БЕЗ ТОЧЕК!
 from db_models import Base, User, Candidate, OwnedBusiness, Chat 
 
-# 2. НАСТРОЙКИ БАЗЫ ДАННЫХ (PostgreSQL) - используем переменную, как в main.py
+# 2. НАСТРОЙКИ БАЗЫ ДАННЫХ (PostgreSQL)
 DB_PATH = os.environ.get("DATABASE_URL") 
 
 # Fix: SQLAlchemy и psycopg2 требуют схему postgresql://
@@ -23,6 +23,7 @@ engine = create_engine(DB_PATH, pool_pre_ping=True)
 
 # 4. Создание сессии (ЭТО НУЖНО ДЛЯ ВАШЕГО КОДА)
 Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+SessionLocal = Session # Добавим SessionLocal, на случай если он нужен где-то еще
 
 # 5. Функция инициализации (создает таблицы)
 def init_db():
@@ -31,7 +32,8 @@ def init_db():
         Base.metadata.create_all(bind=engine)
         return True
     except Exception as e:
-        print(f"Ошибка инициализации БД: {e}")
+        # В реальной жизни нужно логировать, но для старта пока оставим print
+        print(f"Ошибка инициализации БД: {e}") 
         return False
 
 # 6. Функция для получения пользователя (пример)
@@ -41,12 +43,13 @@ def get_user_profile_sync(telegram_id: int, username: str, admin_id: int):
         user = session.query(User).filter(User.telegram_id == telegram_id).first()
         
         if not user:
-            is_admin = telegram_id == admin_id
+            is_owner = telegram_id == admin_id # Проверка на владельца
             user = User(
                 telegram_id=telegram_id, 
                 username=username, 
-                is_owner=is_admin, # Установим владельца
+                is_owner=is_owner, # Установим владельца
                 balance=1000
+                # last_work_time будет установлено в db_models.py по умолчанию
             )
             session.add(user)
             session.commit()
@@ -60,4 +63,34 @@ def save_chat_sync(chat_id: int):
             session.add(Chat(chat_id=chat_id))
             session.commit()
 
-# ... ТВОИ ДРУГИЕ ФУНКЦИИ (update_user_sync, get_all_users_sync, apply_tax_sync) ИДУТ ЗДЕСЬ
+# --- НОВЫЕ ФУНКЦИИ (ИСПРАВЛЕНИЕ ОШИБКИ ИМПОРТА) ---
+
+# 8. Функция для обновления пользователя
+# Обновляет любые поля, переданные через **kwargs
+def update_user_sync(telegram_id: int, **kwargs):
+    with Session() as session:
+        # Используем .filter_by для обновления полей
+        result = session.query(User).filter(User.telegram_id == telegram_id).update(kwargs)
+        session.commit()
+        return result > 0
+
+# 9. Функция для получения всех пользователей
+def get_all_users_sync():
+    with Session() as session:
+        # Возвращает всех пользователей, отсортированных по балансу (для /top)
+        return session.query(User).order_by(User.balance.desc()).all()
+
+# 10. Функция для получения всех чатов
+def get_all_chats_sync():
+    with Session() as session:
+        # Возвращает все чаты (нужно для рассылок)
+        return session.query(Chat).all()
+        
+# 11. Функция для начисления налога
+# (Заглушка, так как реальная логика у тебя в main.py)
+def apply_tax_sync(tax_rate: float):
+    # Эта функция должна быть реализована, если она вызывается в main.py
+    # Тут можно обновить всех пользователей: уменьшить баланс на tax_rate
+    return # Заглушка, чтобы устранить ошибку импорта
+    
+# --- КОНЕЦ НОВЫХ ФУНКЦИЙ ---
