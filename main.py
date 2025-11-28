@@ -9,10 +9,11 @@ from sqlalchemy.orm import sessionmaker, declarative_base, relationship, selecti
 from sqlalchemy.exc import SQLAlchemyError
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, BotCommand, BotCommandScopeDefault
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.exceptions import TelegramAPIError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # =========================================================
@@ -183,7 +184,7 @@ def pay_tax_to_president(amount):
 # === 4. ИНИЦИАЛИЗАЦИЯ БОТА ===
 # =========================================================
 
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(token=BOT_TOKEN, parse_mode="Markdown")
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
@@ -197,6 +198,48 @@ class AdminState(StatesGroup):
     give_id = State()
     give_amount = State()
     tax_rate = State()
+
+# --- Настройка команд для меню Telegram ---
+async def set_bot_commands(bot: Bot):
+    """Устанавливает команды для меню Telegram."""
+    commands = [
+        BotCommand(command="start", description="Запуск бота"),
+        BotCommand(command="profile", description="Профиль и баланс"),
+        BotCommand(command="work", description="Поработать (кулдаун 4ч)"),
+        BotCommand(command="admin", description="Панель администратора (если есть права)"),
+        BotCommand(command="help", description="Подробный список команд и их синтаксис"),
+    ]
+    await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+    logging.info("Команды бота установлены.")
+
+# --- Утилита для рассылки сообщений ---
+async def broadcast_message_to_chats(bot: Bot, message_text: str):
+    """Отправляет сообщение во все зарегистрированные чаты."""
+    logging.info("Начало рассылки уведомлений по чатам.")
+    with Session() as s:
+        # Получаем список всех chat_id из таблицы Chat
+        chat_ids = [chat.chat_id for chat in s.query(Chat).all()]
+        
+    success_count = 0
+    
+    for chat_id in chat_ids:
+        # Используем try/except, потому что бот мог быть удален из чата
+        try:
+            # Отправка обычного сообщения. Telegram сам решит, присылать уведомление или нет.
+            await bot.send_message(
+                chat_id,
+                message_text,
+                parse_mode="Markdown"
+                # disable_notification=False is default
+            )
+            success_count += 1
+            await asyncio.sleep(0.05) # Задержка для предотвращения флуда
+        except TelegramAPIError as e:
+            logging.warning(f"Не удалось отправить сообщение в чат {chat_id}: {e}")
+        except Exception as e:
+            logging.error(f"Непредвиденная ошибка при рассылке в чат {chat_id}: {e}")
+
+    logging.info(f"Рассылка завершена. Успешно отправлено в {success_count} чатов из {len(chat_ids)}.")
 
 # =========================================================
 # === 5. ЭКОНОМИКА И ПЛАНИРОВЩИК ===
@@ -235,6 +278,7 @@ async def business_payout():
                 u.balance += amount
                 # Пытаемся уведомить
                 try:
+                    # Важно использовать parse_mode="Markdown"
                     await bot.send_message(uid, f"💼 **Бизнес-доход:** +{amount:,} $\n(Налог {int(tax*100)}% уплачен в Казну)")
                 except: pass
         s.commit()
@@ -247,7 +291,7 @@ async def business_payout():
 async def cmd_start(message: types.Message):
     # Сохраняем чат
     with Session() as s:
-        if not s.query(Chat).filter_by(chat_id=message.chat.id).first():
+        if message.chat.type != 'private' and not s.query(Chat).filter_by(chat_id=message.chat.id).first():
             s.add(Chat(chat_id=message.chat.id))
             s.commit()
 
@@ -268,6 +312,43 @@ async def cmd_start(message: types.Message):
         reply_markup=kb,
         parse_mode="Markdown"
     )
+
+@dp.message(Command("help"))
+async def cmd_help(message: types.Message):
+    """Обработчик команды /help - отображает все команды и подсказки."""
+    u = await asyncio.to_thread(get_user, message.from_user.id, message.from_user.username)
+
+    # Общие команды
+    text = (
+        f"🤖 **СПРАВКА ПО КОМАНДАМ**\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"**Основные команды (Кнопки):**\n"
+        f"/start - Запуск бота.\n"
+        f"/profile - Ваш профиль и баланс.\n"
+        f"/work - Поработать (раз в 4 часа).\n"
+        f"/help - Показать это меню.\n"
+        f"**Кнопки меню:** Профиль, Работать, Бизнес, Казино, Топ, Политика.\n"
+    )
+
+    # Административные команды (показываем, если пользователь админ)
+    if u.is_admin or u.is_owner:
+        text += (
+            f"\n🛡️ **АДМИНИСТРАТОРСКИЕ КОМАНДЫ:**\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"1. **Выдать деньги (Быстро):**\n"
+            f"   Синтаксис: `/give [сумма]`\n"
+            f"   _Использование:_ Ответьте на сообщение игрока и введите команду (напр., `/give 10000`).\n\n"
+            f"2. **Арест (Быстро):**\n"
+            f"   Синтаксис: `/arrest [минуты] [причина]`\n"
+            f"   _Использование:_ Ответьте на сообщение игрока (напр., `/arrest 60 Чит`).\n\n"
+            f"3. **Освобождение (Быстро):**\n"
+            f"   Синтаксис: `/release`\n"
+            f"   _Использование:_ Ответьте на сообщение арестованного игрока.\n\n"
+            f"4. **Панель управления:**\n"
+            f"   Команда: `/admin` (открывает меню с кнопками для сложных действий: налоги, выборы, ручной ввод ID)."
+        )
+
+    await message.answer(text, parse_mode="Markdown")
 
 @dp.message(F.text == BTN_PROFILE)
 async def cmd_profile(message: types.Message):
@@ -440,7 +521,7 @@ async def buy_biz_cb(call: types.CallbackQuery):
         
         exist = s.query(OwnedBusiness).filter_by(user_id=uid, business_id=bid).first()
         if exist: exist.count += 1
-        else: s.add(OwnedBusiness(user_id=uid, business_id=bid, name=info['name'], count=1))
+        else: s.add(OwnedBusiness(user_id=uid, business_id=bid, count=1))
         s.commit()
         
     await call.answer(f"✅ Вы успешно купили {info['name']}!", show_alert=True)
@@ -588,17 +669,169 @@ async def cmd_admin(message: types.Message):
     if not u.is_admin and not u.is_owner: return # Только для админов
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💸 Выдать деньги", callback_data="adm_give")],
-        [InlineKeyboardButton(text="🔒 Арестовать", callback_data="adm_arrest"),
-         InlineKeyboardButton(text="🔓 Освободить", callback_data="adm_release")],
+        [InlineKeyboardButton(text="💸 Выдать деньги (ID)", callback_data="adm_give")],
+        [InlineKeyboardButton(text="🔒 Арестовать (ID)", callback_data="adm_arrest"),
+         InlineKeyboardButton(text="🔓 Освободить (Reply)", callback_data="adm_release")],
         [InlineKeyboardButton(text="🗳 Начать выборы", callback_data="adm_start_el")],
         [InlineKeyboardButton(text="➡️ Начать голосование", callback_data="adm_start_vote")],
         [InlineKeyboardButton(text="🏁 Завершить выборы", callback_data="adm_end_el")],
         [InlineKeyboardButton(text="📉 Изменить налог", callback_data="adm_tax")]
     ])
-    await message.answer("🛠 **Админ Панель**", reply_markup=kb)
+    await message.answer("🛠 **Админ Панель**", reply_markup=kb, parse_mode="Markdown")
 
-# --- Арест/Освобождение ---
+# --- Новые команды на ответ (Reply) с уведомлениями ---
+
+@dp.message(Command("give"), F.reply_to_message)
+async def cmd_give_money_reply(message: types.Message, command: CommandObject):
+    """Выдача денег по ответу на сообщение."""
+    sender = await asyncio.to_thread(get_user, message.from_user.id)
+    if not sender.is_admin and not sender.is_owner:
+        return await message.reply("🚫 **Нет прав.** Только для администраторов.")
+
+    target_msg = message.reply_to_message
+    if not target_msg.from_user:
+        return await message.reply("❌ Нельзя выдать деньги этому объекту (например, каналу).")
+
+    try:
+        if command.args is None:
+            raise ValueError("Нет суммы")
+        # Берем только первый аргумент как сумму
+        amount = int(command.args.split()[0])
+        if amount <= 0:
+            raise ValueError("Сумма должна быть положительной")
+    except ValueError:
+        return await message.reply("❌ **Неверный формат.** Используйте: `/give [сумма]`, ответив на сообщение игрока.")
+
+    target_id = target_msg.from_user.id
+    target_username = target_msg.from_user.username
+    
+    target_user = await asyncio.to_thread(get_user, target_id, target_username)
+    
+    # Обновление баланса
+    with Session() as s:
+        u = s.query(User).filter_by(telegram_id=target_id).first()
+        if u:
+            u.balance += amount
+            s.commit()
+            
+            # 1. Уведомление в чате (Подтверждение действия)
+            await message.reply(
+                f"✅ **УСПЕХ!** Админ **{sender.username}** выдал "
+                f"**{amount:,} $** пользователю **{target_user.username}**."
+            )
+            
+            # 2. Уведомление в ЛС (Приватное уведомление)
+            try:
+                await bot.send_message(
+                    target_id,
+                    f"🎉 **УВЕДОМЛЕНИЕ ОТ АДМИНА:**\n"
+                    f"Вам начислено **{amount:,} $**."
+                )
+            except:
+                logging.warning(f"Не удалось отправить ЛС пользователю {target_id}.")
+                pass
+        else:
+            await message.reply("❌ Игрок не найден в базе данных.")
+
+
+@dp.message(Command("arrest"), F.reply_to_message)
+async def cmd_arrest_reply(message: types.Message, command: CommandObject):
+    """Арест по ответу на сообщение."""
+    sender = await asyncio.to_thread(get_user, message.from_user.id)
+    if not sender.is_admin and not sender.is_owner:
+        return await message.reply("🚫 **Нет прав.**")
+
+    target_msg = message.reply_to_message
+    if not target_msg.from_user:
+        return await message.reply("❌ Нельзя арестовать этот объект.")
+        
+    if command.args is None:
+        return await message.reply("❌ **Неверный формат.** Используйте: `/arrest [минуты] [причина]`, ответив на сообщение игрока.")
+        
+    args = command.args.split(maxsplit=1)
+    
+    try:
+        mins = int(args[0])
+        reason = args[1] if len(args) > 1 else "Не указана"
+        if mins <= 0: raise ValueError
+    except:
+        return await message.reply("❌ **Неверный формат.** Первым аргументом должно быть число минут.")
+
+    target_id = target_msg.from_user.id
+    target_username = target_msg.from_user.username
+    
+    # Обновление ареста
+    with Session() as s:
+        u = s.query(User).filter_by(telegram_id=target_id).first()
+        if u:
+            u.arrest_expires = datetime.now() + timedelta(minutes=mins)
+            s.commit()
+            
+            # 1. Уведомление в чате
+            await message.reply(
+                f"🚨 Игрок **{target_username}** арестован "
+                f"на **{mins} мин.** (Причина: {reason})."
+            )
+            
+            # 2. Уведомление в ЛС
+            try:
+                await bot.send_message(
+                    target_id,
+                    f"👮 **ВАС АРЕСТОВАЛИ!**\n"
+                    f"Срок: **{mins} мин.**\n"
+                    f"Причина: **{reason}**"
+                )
+            except: pass
+        else:
+            await message.reply("❌ Игрок не найден в базе данных.")
+
+
+@dp.message(Command("release"), F.reply_to_message)
+async def cmd_release_reply(message: types.Message):
+    """Освобождение по ответу на сообщение."""
+    sender = await asyncio.to_thread(get_user, message.from_user.id)
+    if not sender.is_admin and not sender.is_owner:
+        return await message.reply("🚫 **Нет прав.**")
+
+    target_msg = message.reply_to_message
+    if not target_msg.from_user:
+        return await message.reply("❌ Нельзя освободить этот объект.")
+
+    target_id = target_msg.from_user.id
+    target_username = target_msg.from_user.username
+    
+    # Освобождение
+    with Session() as s:
+        u = s.query(User).filter_by(telegram_id=target_id).first()
+        if u:
+            if u.arrest_expires and u.arrest_expires > datetime.now():
+                u.arrest_expires = datetime.now() # Немедленное освобождение
+                s.commit()
+                
+                # 1. Уведомление в чате
+                await message.reply(f"✅ Игрок **{target_username}** освобожден **АДМИНИСТРАЦИЕЙ**.")
+                
+                # 2. Уведомление в ЛС
+                try:
+                    await bot.send_message(target_id, f"🎉 **ВЫ СВОБОДНЫ!** Администрация объявила амнистию.")
+                except: pass
+            else:
+                await message.reply("❌ Игрок не находится под арестом.")
+        else:
+            await message.reply("❌ Игрок не найден в базе данных.")
+
+# --- Арест/Освобождение (callback fix) ---
+
+@dp.callback_query(F.data == "adm_release")
+async def adm_release_callback(call: types.CallbackQuery):
+    """Информирование админа о новой команде /release"""
+    await call.answer("Используйте команду /release в чате, ответив на сообщение игрока!", show_alert=True)
+    await call.message.answer(
+        "🔓 **Освобождение:** Чтобы быстро освободить игрока, ответьте на его сообщение командой `/release`."
+    )
+    
+# --- Арест/Освобождение (Старый Flow - через ID) ---
+# Оставлен, так как может использоваться для других целей
 
 @dp.callback_query(F.data == "adm_arrest")
 async def adm_arrest_start(call: types.CallbackQuery, state: FSMContext):
@@ -638,34 +871,7 @@ async def adm_arrest_finish(message: types.Message, state: FSMContext):
         
     await state.clear()
 
-@dp.callback_query(F.data == "adm_release")
-async def adm_release(call: types.CallbackQuery):
-    await call.message.answer("Введите ID игрока для освобождения:")
-    await call.message.answer("ID игрока:")
-    await call.message.answer("Введите ID игрока для освобождения (или 'отмена'):")
-    await call.message.answer("Введите ID игрока для освобождения (или 'отмена'):")
-    await call.message.answer("Введите ID игрока для освобождения:")
-    await call.message.answer("Введите ID игрока для освобождения:")
-
-@dp.message()
-async def adm_release_exec(message: types.Message):
-    if not message.text.isdigit():
-        return
-    
-    uid = int(message.text)
-    
-    with Session() as s:
-        u = s.query(User).filter_by(telegram_id=uid).first()
-        if u and u.arrest_expires and u.arrest_expires > datetime.now():
-            u.arrest_expires = datetime.now() # Немедленное освобождение
-            s.commit()
-            await message.answer(f"✅ Игрок `{uid}` освобожден.")
-            try: await bot.send_message(uid, f"🎉 **ВЫ СВОБОДНЫ!** Амнистия.")
-            except: pass
-        else:
-            await message.answer("Игрок не найден или не находится под арестом.")
-
-# --- Управление Деньгами ---
+# --- Управление Деньгами (Старый Flow - через ID) ---
 
 @dp.callback_query(F.data == "adm_give")
 async def adm_give_start(call: types.CallbackQuery, state: FSMContext):
@@ -674,15 +880,22 @@ async def adm_give_start(call: types.CallbackQuery, state: FSMContext):
 
 @dp.message(AdminState.give_id)
 async def adm_give_exec(message: types.Message, state: FSMContext):
+    # Добавлена проверка и уведомления в этом старом flow
     try:
         uid, amount = map(int, message.text.split())
         with Session() as s:
             u = s.query(User).filter_by(telegram_id=uid).first()
             if u:
+                sender = await asyncio.to_thread(get_user, message.from_user.id)
                 u.balance += amount
                 s.commit()
+                
+                # Уведомление в чате (для админа)
                 await message.answer(f"✅ Выдано **{amount:,} $** игроку `{uid}`. Новый баланс: {u.balance:,} $")
-                try: await bot.send_message(uid, f"💸 **АДМИН ВЫДАЛ** вам **{amount:,} $**!")
+                
+                # Уведомление в ЛС
+                try:
+                    await bot.send_message(uid, f"💸 **АДМИН {sender.username} ВЫДАЛ** вам **{amount:,} $**!")
                 except: pass
             else:
                 await message.answer("Игрок не найден.")
@@ -716,14 +929,17 @@ async def adm_tax_set(message: types.Message, state: FSMContext):
             st = s.query(ElectionState).first()
             st.tax_rate = new_rate_float
             s.commit()
+            
+            # Уведомление о действии
             await message.answer(f"✅ Налог успешно изменен на **{new_rate_percent}%**.")
+            
     except:
         await message.answer("❌ Введите корректное число.")
     finally:
         await state.clear()
 
 
-# --- Управление Выборами ---
+# --- Управление Выборами с рассылкой уведомлений ---
 
 @dp.callback_query(F.data == "adm_start_el")
 async def adm_start_el(call: types.CallbackQuery):
@@ -732,8 +948,16 @@ async def adm_start_el(call: types.CallbackQuery):
         st.phase = "CANDIDACY"
         s.query(Candidate).delete() # Сброс старых кандидатов
         s.commit()
+    
+    # --- НОВОЕ: Рассылка уведомления по всем чатам ---
+    await broadcast_message_to_chats(
+        call.bot,
+        f"📢 **НАБОР КАНДИДАТОВ ОТКРЫТ!**\n"
+        f"Начались выборы президента. Успейте подать заявку через меню 'Политика'!"
+    )
+    
     await call.answer("Набор кандидатов открыт!", show_alert=True)
-    await call.message.edit_text("✅ **Набор кандидатов открыт!** Игроки могут подавать заявки через меню 'Политика'.")
+    await call.message.edit_text("✅ **Набор кандидатов открыт!** (Уведомления разосланы)")
 
 @dp.callback_query(F.data == "adm_start_vote")
 async def adm_start_vote(call: types.CallbackQuery):
@@ -744,8 +968,16 @@ async def adm_start_vote(call: types.CallbackQuery):
         st = s.query(ElectionState).first()
         st.phase = "VOTING"
         s.commit()
+        
+    # --- НОВОЕ: Рассылка уведомления по всем чатам ---
+    await broadcast_message_to_chats(
+        call.bot,
+        f"🗳️ **ГОЛОСОВАНИЕ НАЧАЛОСЬ!**\n"
+        f"Отдайте свой голос за кандидата через меню 'Политика'."
+    )
+    
     await call.answer("Голосование началось!", show_alert=True)
-    await call.message.edit_text("✅ **ГОЛОСОВАНИЕ НАЧАЛОСЬ!** Все игроки могут отдать свой голос.")
+    await call.message.edit_text("✅ **ГОЛОСОВАНИЕ НАЧАЛОСЬ!** (Уведомления разосланы)")
 
 @dp.callback_query(F.data == "adm_end_el")
 async def adm_end_el(call: types.CallbackQuery):
@@ -754,14 +986,13 @@ async def adm_end_el(call: types.CallbackQuery):
     
     with Session() as s:
         # Считаем голоса
-        # Выбираем кандидата с максимальным количеством голосов
         winner = s.query(Candidate).order_by(Candidate.votes.desc()).first()
+        
+        # 1. Снимаем старого президента
+        s.query(User).filter_by(is_president=True).update({User.is_president: False})
         
         if winner:
             winner_user = s.query(User).filter_by(telegram_id=winner.user_id).first()
-            
-            # 1. Снимаем старого президента
-            s.query(User).filter_by(is_president=True).update({User.is_president: False})
             
             # 2. Назначаем нового
             winner_user.is_president = True
@@ -781,8 +1012,12 @@ async def adm_end_el(call: types.CallbackQuery):
     msg = f"🎉 **ВЫБОРЫ ЗАВЕРШЕНЫ!** 🎉\n"
     if winner_id:
         msg += f"Новый президент: 🦅 **{winner_name}** (ID: `{winner_id}`).\nПоздравляем!"
+        await bot.send_message(winner_id, "🔥 **ПОЗДРАВЛЯЕМ!** Вы стали новым Президентом игры!")
     else:
         msg += "Президент не был избран."
+    
+    # --- НОВОЕ: Рассылка объявления о результатах ---
+    await broadcast_message_to_chats(call.bot, msg)
         
     await call.message.edit_text(msg, parse_mode="Markdown")
 
@@ -795,7 +1030,7 @@ async def on_startup():
     """Действия при запуске бота: инициализация БД и планировщика."""
     if init_db():
         # Добавляем задачу начислений с интервалом в 1 час
-        scheduler.add_job(business_payout, 'interval', seconds=BUSINESS_PAYOUT_INTERVAL)
+        scheduler.add_job(business_payout, 'interval', seconds=BUSINESS_PAYOUT_INTERVAL, id='biz_payout')
         scheduler.start()
         print("🚀 Бот и планировщик запущены!")
     else:
@@ -805,20 +1040,28 @@ async def on_startup():
 async def main():
     """Основная точка входа для запуска бота."""
     if not BOT_TOKEN:
-        raise ValueError("BOT_TOKEN не найден. Установите переменную окружения.")
+        logging.error("❌ BOT_TOKEN не найден. Завершение работы.")
+        return
+
+    if init_db():
+        # Вызов set_bot_commands для установки команд в меню Telegram
+        await set_bot_commands(bot)
         
-    dp.startup.register(on_startup)
+        # Добавляем задачу начислений с интервалом в 1 час
+        scheduler.add_job(business_payout, 'interval', seconds=BUSINESS_PAYOUT_INTERVAL, id='biz_payout')
+        scheduler.start()
+        logging.info("🚀 Бот и планировщик запущены!")
+    else:
+        logging.error("❌ Критическая ошибка БД. Бот запущен, но может работать некорректно.")
     
-    # Используем asyncio.run для запуска
-    await dp.start_polling(bot, skip_updates=True)
+    # Запуск поллинга
+    await dp.start_polling(bot)
 
 
-if __name__ == '__main__':
-    if "sqlite" in DB_PATH:
-        os.makedirs("data", exist_ok=True)
+if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Бот остановлен вручную.")
+        pass
     except Exception as e:
-        print(f"Критическая ошибка при запуске: {e}")
+        logging.error(f"Критическая ошибка запуска: {e}")
