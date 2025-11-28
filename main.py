@@ -17,7 +17,7 @@ try:
     from aiogram.fsm.context import FSMContext
     from aiogram.fsm.state import State, StatesGroup
     
-    from sqlalchemy import create_engine, Column, Integer, String, BigInteger, DateTime, Boolean, DECIMAL, func
+    from sqlalchemy import create_engine, Column, Integer, String, BigInteger, DateTime, Boolean, DECIMAL, func, text
     from sqlalchemy.orm import sessionmaker, declarative_base
     from sqlalchemy.exc import SQLAlchemyError
 except ImportError as e:
@@ -154,15 +154,35 @@ class Candidate(Base):
 def init_db():
     logging.info("Инициализация базы данных...")
     try:
-        # Создание таблиц
-        Base.metadata.create_all(engine)
+        # 1. Создание таблиц (только если не существуют)
+        Base.metadata.create_all(engine) 
         
+        # 2. МИГРАЦИЯ: Проверка и добавление отсутствующих колонок (FIX Unknown column 'user.last_work')
+        try:
+            with engine.connect() as connection:
+                # Проверяем, существует ли колонка last_work в таблице user
+                result = connection.execute(text("SHOW COLUMNS FROM user LIKE 'last_work'"))
+                
+                # Если колонка не найдена, добавляем ее
+                if not result.first():
+                    logging.info("⚙️ Добавление отсутствующей колонки 'last_work' в таблицу user.")
+                    connection.execute(text("ALTER TABLE user ADD COLUMN last_work DATETIME NULL"))
+                    connection.commit()
+                else:
+                    logging.info("Колонка 'last_work' уже существует.")
+        except Exception as e:
+            # Оставляем warning, на случай если таблица 'user' еще не создана
+            logging.warning(f"⚠️ Ошибка при попытке миграции (может быть нормально при первом запуске): {e}")
+
+
+        # 3. Основная инициализация (ElectionState и админ)
         with Session() as s:
             # Создание ElectionState
             if not s.query(ElectionState).first():
                 logging.info("Создание начальной записи ElectionState.")
+                # Использование актуального OWNER_ID, чтобы избежать ошибок
                 s.add(ElectionState(
-                    phase="IDLE",
+                    phase="IDLE", 
                     end_time=datetime.now(),
                     last_election_time=datetime.now() - ELECTION_COOLDOWN
                 ))
