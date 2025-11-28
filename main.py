@@ -194,7 +194,8 @@ def get_user(telegram_id: int, create_if_not_exists: bool = True) -> User:
             )
             return temp_user
         return None
-      def format_business_list(owned_businesses):
+
+def format_business_list(owned_businesses):
     """Форматирует список купленных бизнесов для вывода."""
     if not owned_businesses:
         return "У вас пока нет купленных бизнесов."
