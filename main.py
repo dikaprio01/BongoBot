@@ -1039,8 +1039,7 @@ async def admin_start_candidacy(callback: CallbackQuery):
                 f"Кандидаты могут подавать заявки через /candidate",
                 reply_markup=admin_panel_keyboard
             )
-            await send_global_notification(
-                callback.bot, 
+            await send_global_notification( 
                 f"📣 **ВАЖНОЕ ОБЪЯВЛЕНИЕ:**\n\n"
                 f"Начат **НАБОР КАНДИДАТОВ** на пост Президента!\n"
                 f"Срок подачи: до **{state.end_time.strftime('%H:%M %d.%m.%Y')}** (Длительность: {int(CANDIDACY_DURATION.total_seconds() / 3600)} часа).\n"
@@ -1077,8 +1076,7 @@ async def admin_start_voting(callback: CallbackQuery):
                 f"Проголосовать можно в разделе 🗳️ Политика.",
                 reply_markup=admin_panel_keyboard
             )
-            await send_global_notification(
-                callback.bot, 
+            await send_global_notification( 
                 f"📢 **ГОЛОСОВАНИЕ НАЧАТО!**\n\n"
                 f"Вы можете отдать свой голос за одного из кандидатов.\n"
                 f"Спешите, осталось мало времени! До: **{state.end_time.strftime('%H:%M %d.%m.%Y')}**.\n"
@@ -1130,8 +1128,7 @@ async def admin_end_election(callback: CallbackQuery):
 
             await callback.message.edit_text(f"✅ **ВЫБОРЫ ЗАВЕРШЕНЫ**\n\n{winner_text}", reply_markup=admin_panel_keyboard)
             
-            await send_global_notification(
-                callback.bot, 
+            await send_global_notification( 
                 f"🎉 **ВЫБОРЫ ЗАВЕРШЕНЫ!**\n\n"
                 f"{winner_text}\n\n"
                 f"Новый цикл выборов начнется через {int(ELECTION_COOLDOWN.total_seconds() / 3600)} часа."
