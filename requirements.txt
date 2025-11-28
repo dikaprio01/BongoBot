@@ -3,3 +3,4 @@ SQLAlchemy
 apscheduler
 python-dotenv
 pymysql
+cryptography
