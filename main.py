@@ -39,7 +39,7 @@ if not BOT_TOKEN:
     sys.exit(1)
 
 # Подключение к базе данных (MySQL на Railway)
-DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("MySql_url")
+DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("MYSQL_URL")
 if not DATABASE_URL:
     logging.error("❌ DATABASE_URL (или MySql_url) не найдена в переменных окружения.")
     sys.exit(1)
