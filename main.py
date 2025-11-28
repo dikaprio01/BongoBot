@@ -1083,25 +1083,6 @@ async def admin_end_election(callback: CallbackQuery):
                     f"Наш новый президент: **{winner_name}**!\n"
                     f"Голосов: **{winner.votes}**"
                 )
-@router.callback_query(F.data == "admin_reset_elections")
-async def admin_reset_elections(callback: CallbackQuery):
-    try:
-        with Session() as s:
-            # Сброс состояния
-            state = s.query(ElectionState).first()
-            state.phase = "IDLE"
-            state.end_time = datetime.now()
-            state.last_election_time = datetime.now() - ELECTION_COOLDOWN # Готовность к немедленному запуску
-
-            # Удаление всех данных о выборах
-            s.query(Candidate).delete()
-            s.query(Vote).delete()
-            
-            s.commit()
-            await callback.message.edit_text("✅ Все данные о выборах сброшены. Фаза установлена на IDLE.", reply_markup=admin_panel_keyboard)
-    except Exception as e:
-        logging.error(f"DB Error on admin_reset_elections: {e}")
-        await callback.message.edit_text("❌ Ошибка базы данных при сбросе выборов.", reply_markup=admin_panel_keyboard)
                 # TODO: Здесь можно добавить логику награждения победителя (например, установку ему админских прав)
             
             # Сброс состояния
@@ -1127,7 +1108,27 @@ async def admin_reset_elections(callback: CallbackQuery):
     except Exception as e:
         logging.error(f"DB Error on admin_end_election: {e}")
         await callback.message.edit_text("❌ Ошибка базы данных при завершении выборов.", reply_markup=admin_panel_keyboard)
-    
+
+@router.callback_query(F.data == "admin_reset_elections")
+async def admin_reset_elections(callback: CallbackQuery):
+    try:
+        with Session() as s:
+            # Сброс состояния
+            state = s.query(ElectionState).first()
+            state.phase = "IDLE"
+            state.end_time = datetime.now()
+            state.last_election_time = datetime.now() - ELECTION_COOLDOWN # Готовность к немедленному запуску
+
+            # Удаление всех данных о выборах
+            s.query(Candidate).delete()
+            s.query(Vote).delete()
+            
+            s.commit()
+            await callback.message.edit_text("✅ Все данные о выборах сброшены. Фаза установлена на IDLE.", reply_markup=admin_panel_keyboard)
+    except Exception as e:
+        logging.error(f"DB Error on admin_reset_elections: {e}")
+        await callback.message.edit_text("❌ Ошибка базы данных при сбросе выборов.", reply_markup=admin_panel_keyboard)
+      
 async def main():
     logging.info("Starting bot...")
     init_db()
