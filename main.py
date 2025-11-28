@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.DEBUG,
 try:
     from aiogram import Bot, Dispatcher, types, F, Router
     from aiogram.client.default import DefaultBotProperties
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, CallbackQuery
     from aiogram.filters.command import Command
     from aiogram.fsm.context import FSMContext
     from aiogram.fsm.state import State, StatesGroup
