@@ -989,94 +989,144 @@ async def admin_give_money_get_amount(message: types.Message, state: FSMContext)
 # Дублируем обработчики политики для стабильности, чтобы они не потерялись в длинном коде
 
 @router.callback_query(F.data == "admin_start_candidacy")
-async def admin_start_candidacy_handler(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id): return await callback.answer("❌ Доступ запрещен.", show_alert=True)
-    await callback.answer()
+async def admin_start_candidacy(callback: CallbackQuery):
     try:
         with Session() as s:
-            s.query(Candidate).delete()
             state = s.query(ElectionState).first()
+            if state.phase != "IDLE":
+                await callback.message.edit_text("❌ Набор кандидатов уже начат или идут выборы.", reply_markup=admin_panel_keyboard)
+                return
+
             state.phase = "CANDIDACY"
-            state.end_time = datetime.now() + ELECTION_DURATION_CANDIDACY
-            state.last_election_time = datetime.now()
+            state.end_time = datetime.now() + CANDIDACY_DURATION
             s.commit()
-        await callback.message.edit_text(
-            f"👮‍♂️ *Админ-панель*\n\nТекущая фаза: *{state.phase}* (до {state.end_time.strftime('%H:%M:%S')})",
-            reply_markup=callback.message.reply_markup
-        )
-        await send_global_notification(
-            f"📢 *ВНИМАНИЕ! Началась регистрация кандидатов!* 📢\nФаза продлится {ELECTION_DURATION_CANDIDACY.seconds // 3600} час."
-        )
-    except SQLAlchemyError as e:
+
+            await callback.message.edit_text(
+                f"✅ **Набор кандидатов начат!**\n\n"
+                f"Продлится до: **{state.end_time.strftime('%H:%M %d.%m.%Y')}**\n"
+                f"Кандидаты могут подавать заявки через /candidate",
+                reply_markup=admin_panel_keyboard
+            )
+            await send_global_notification(
+                callback.bot, 
+                f"📣 **ВАЖНОЕ ОБЪЯВЛЕНИЕ:**\n\n"
+                f"Начат **НАБОР КАНДИДАТОВ** на пост Президента!\n"
+                f"Срок подачи: до **{state.end_time.strftime('%H:%M %d.%m.%Y')}** (Длительность: {int(CANDIDACY_DURATION.total_seconds() / 3600)} часа).\n"
+                f"Подать заявку: /candidate"
+            )
+
+    except Exception as e:
         logging.error(f"DB Error on admin_start_candidacy: {e}")
-        await bot.send_message(callback.from_user.id, "Ошибка БД при начале регистрации.", reply_markup=main_keyboard)
+        await callback.message.edit_text("❌ Ошибка базы данных при начале набора кандидатов.", reply_markup=admin_panel_keyboard)
 
 @router.callback_query(F.data == "admin_start_voting")
-async def admin_start_voting_handler(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id): return await callback.answer("❌ Доступ запрещен.", show_alert=True)
-    await callback.answer()
+async def admin_start_voting(callback: CallbackQuery):
     try:
         with Session() as s:
-            candidate_count = s.query(Candidate).count()
-            if candidate_count == 0:
-                await bot.send_message(callback.from_user.id, "❌ Невозможно начать голосование: нет кандидатов.", reply_markup=main_keyboard)
-                return
             state = s.query(ElectionState).first()
-            state.phase = "VOTING"
-            state.end_time = datetime.now() + ELECTION_DURATION_VOTING
-            s.commit()
-        await callback.message.edit_text(
-            f"👮‍♂️ *Админ-панель*\n\nТекущая фаза: *{state.phase}* (до {state.end_time.strftime('%H:%M:%S')})",
-            reply_markup=callback.message.reply_markup
-        )
-        await send_global_notification(
-            f"📣 *ГОЛОСОВАНИЕ НАЧАЛОСЬ!* 📣\nЗаходите в раздел '🏛 Политика' и выберите своего кандидата. Фаза продлится {ELECTION_DURATION_VOTING.seconds // 3600} час."
-        )
-    except SQLAlchemyError as e:
-        logging.error(f"DB Error on admin_start_voting: {e}")
-        await bot.send_message(callback.from_user.id, "Ошибка БД при начале голосования.", reply_markup=main_keyboard)
+            
+            if state.phase != "CANDIDACY":
+                await callback.message.edit_text("❌ Набор кандидатов не завершен. Текущая фаза: " + state.phase, reply_markup=admin_panel_keyboard)
+                return
 
+            candidates = s.query(Candidate).all()
+            if not candidates:
+                await callback.message.edit_text("❌ Нет зарегистрированных кандидатов! Невозможно начать голосование.", reply_markup=admin_panel_keyboard)
+                return
+
+            # Начинаем голосование
+            state.phase = "VOTING"
+            state.end_time = datetime.now() + VOTING_DURATION
+            s.commit()
+
+            await callback.message.edit_text(
+                f"✅ **ГОЛОСОВАНИЕ НАЧАТО!**\n\n"
+                f"Продлится до: **{state.end_time.strftime('%H:%M %d.%m.%Y')}** (Длительность: {int(VOTING_DURATION.total_seconds() / 3600)} часа).\n"
+                f"Проголосовать можно в разделе 🗳️ Политика.",
+                reply_markup=admin_panel_keyboard
+            )
+            await send_global_notification(
+                callback.bot, 
+                f"📢 **ГОЛОСОВАНИЕ НАЧАТО!**\n\n"
+                f"Вы можете отдать свой голос за одного из кандидатов.\n"
+                f"Спешите, осталось мало времени! До: **{state.end_time.strftime('%H:%M %d.%m.%Y')}**.\n"
+                f"Перейти: /politics"
+            )
+
+    except Exception as e:
+        logging.error(f"DB Error on admin_start_voting: {e}")
+        await callback.message.edit_text("❌ Ошибка базы данных при начале голосования.", reply_markup=admin_panel_keyboard)
+      
 @router.callback_query(F.data == "admin_end_election")
-async def admin_end_election_handler(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id): return await callback.answer("❌ Доступ запрещен.", show_alert=True)
-    await callback.answer()
+async def admin_end_election(callback: CallbackQuery):
     try:
-        winner_id = None
-        winner_name = "Нет"
         with Session() as s:
             state = s.query(ElectionState).first()
-            if state.phase == "IDLE":
-                await bot.send_message(callback.from_user.id, "Выборы неактивны.", reply_markup=main_keyboard)
+            
+            if state.phase != "VOTING":
+                await callback.message.edit_text("❌ Голосование не идет. Текущая фаза: " + state.phase, reply_markup=admin_panel_keyboard)
                 return
-            
-            # Определяем победителя, используя func.max для стабильности
-            candidate_result = s.query(Candidate).order_by(Candidate.votes.desc()).limit(1).first()
-            
-            if candidate_result:
-                winner_id = candidate_result.user_id
-                winner_user = s.query(User).filter_by(telegram_id=winner_id).first()
-                if winner_user:
-                    winner_name = get_display_name(winner_user)
-            
+
+            # Определяем победителя
+            candidates = s.query(Candidate).all()
+            if not candidates:
+                winner_text = "❌ Выборы завершены без кандидатов. Победитель не объявлен."
+            else:
+                winner = max(candidates, key=lambda c: c.votes)
+                
+                # Получаем имя/никнейм победителя для красивого объявления
+                winner_user = s.query(User).filter_by(telegram_id=winner.user_id).first()
+                winner_name = winner_user.username if winner_user and winner_user.username else winner_user.first_name if winner_user else f"ID: {winner.user_id}"
+                
+                winner_text = (
+                    f"🏆 **ПОБЕДИТЕЛЬ ВЫБОРОВ:**\n\n"
+                    f"Наш новый президент: **{winner_name}**!\n"
+                    f"Голосов: **{winner.votes}**"
+                )
+@router.callback_query(F.data == "admin_reset_elections")
+async def admin_reset_elections(callback: CallbackQuery):
+    try:
+        with Session() as s:
+            # Сброс состояния
+            state = s.query(ElectionState).first()
             state.phase = "IDLE"
             state.end_time = datetime.now()
+            state.last_election_time = datetime.now() - ELECTION_COOLDOWN # Готовность к немедленному запуску
+
+            # Удаление всех данных о выборах
             s.query(Candidate).delete()
+            s.query(Vote).delete()
+            
+            s.commit()
+            await callback.message.edit_text("✅ Все данные о выборах сброшены. Фаза установлена на IDLE.", reply_markup=admin_panel_keyboard)
+    except Exception as e:
+        logging.error(f"DB Error on admin_reset_elections: {e}")
+        await callback.message.edit_text("❌ Ошибка базы данных при сбросе выборов.", reply_markup=admin_panel_keyboard)
+                # TODO: Здесь можно добавить логику награждения победителя (например, установку ему админских прав)
+            
+            # Сброс состояния
+            state.phase = "IDLE"
+            state.end_time = datetime.now()
+            state.last_election_time = datetime.now()
+            
+            # Удаление кандидатов и голосов
+            s.query(Candidate).delete()
+            s.query(Vote).delete()
+            
             s.commit()
 
-        message_text = (
-            f"👑 *ВЫБОРЫ ЗАВЕРШЕНЫ!* 👑\n\nПоздравляем! Новым лидером становится *{winner_name}*."
-            if winner_id else "🗳️ *ВЫБОРЫ ЗАВЕРШЕНЫ!* \n\nНе было кандидатов или голосов. Фаза сброшена."
-        )
-                           
-        await callback.message.edit_text(
-            f"👮‍♂️ *Админ-панель*\n\nТекущая фаза: *{state.phase}*",
-            reply_markup=callback.message.reply_markup
-        )
-        await send_global_notification(message_text)
-        
-    except SQLAlchemyError as e:
+            await callback.message.edit_text(f"✅ **ВЫБОРЫ ЗАВЕРШЕНЫ**\n\n{winner_text}", reply_markup=admin_panel_keyboard)
+            
+            await send_global_notification(
+                callback.bot, 
+                f"🎉 **ВЫБОРЫ ЗАВЕРШЕНЫ!**\n\n"
+                f"{winner_text}\n\n"
+                f"Новый цикл выборов начнется через {int(ELECTION_COOLDOWN.total_seconds() / 3600)} часа."
+            )
+
+    except Exception as e:
         logging.error(f"DB Error on admin_end_election: {e}")
-        await bot.send_message(callback.from_user.id, "Ошибка БД при завершении выборов.", reply_markup=main_keyboard)
+        await callback.message.edit_text("❌ Ошибка базы данных при завершении выборов.", reply_markup=admin_panel_keyboard)
     
 async def main():
     logging.info("Starting bot...")
