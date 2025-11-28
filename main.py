@@ -9,6 +9,8 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import declarative_base
 # ИСПРАВЛЕНО: Добавлен selectinload для решения DetachedInstanceError
 from sqlalchemy.orm import selectinload 
+# ИСПРАВЛЕНО: ИМПОРТ async.to_thread ДЛЯ НЕБЛОКИРУЮЩЕЙ РАБОТЫ С БД
+from asyncio import to_thread 
 
 from aiogram import Bot, Dispatcher, types, F 
 # ИСПРАВЛЕНО: Импорт ReplyKeyboardMarkup, KeyboardButton для корректной работы клавиатур v3
@@ -64,6 +66,8 @@ class User(Base):
     is_admin = Column(Boolean, default=False)
     is_owner = Column(Boolean, default=False)
     is_president = Column(Boolean, default=False)
+    # ИСПРАВЛЕНО: Добавлен is_banned, так как он используется в send_welcome
+    is_banned = Column(Boolean, default=False) 
 
 class Candidate(Base):
     __tablename__ = 'candidates'
@@ -129,10 +133,15 @@ def get_user_profile_sync(telegram_id: int, username: str, admin_id: int):
                 is_owner=is_owner, 
                 balance=1000
             )
+            # ИСПРАВЛЕНО: добавлен is_banned в модель, т.к. он используется в хендлере.
+            # Если бот упадет из-за отсутствия is_banned, это может быть причиной.
+            setattr(user, 'is_banned', False) 
             session.add(user)
             session.commit()
         
         # Принудительная загрузка атрибутов перед закрытием сессии:
+        # Для корректной работы is_banned в хендлере, нам нужно его значение
+        user.is_banned = getattr(user, 'is_banned', False) # Обеспечиваем наличие атрибута
         _ = user.username
         _ = user.balance
 
@@ -164,14 +173,20 @@ async def business_payout_job():
     logging.info("Выполняется работа планировщика: Выплата по бизнесам.")
     pass 
 
-@dp.message(Command("start")) # ИСПРАВЛЕНО для aiogram v3
+@dp.message(Command("start")) 
 async def send_welcome(message: types.Message):
-    save_chat_sync(message.chat.id)
-    user = get_user_profile_sync(
+    # 💥 ИСПРАВЛЕНИЕ: Используем asyncio.to_thread для неблокирующей работы с БД
+    await to_thread(save_chat_sync, message.chat.id)
+    
+    user = await to_thread(
+        get_user_profile_sync,
         telegram_id=message.from_user.id,
-        username=message.from_user.username,
+        username=message.from_user.username or message.from_user.first_name, # Используем .first_name как запасной вариант для username
         admin_id=ADMIN_ID
     )
+    
+    if user.is_banned:
+        return await message.reply("⛔️ Ты забанен и не можешь пользоваться ботом.")
     
     # ИСПРАВЛЕНО: Создание клавиатуры ReplyKeyboardMarkup в стиле aiogram v3
     button_work = KeyboardButton(text=WORK_BUTTON)
@@ -179,7 +194,8 @@ async def send_welcome(message: types.Message):
     
     keyboard = ReplyKeyboardMarkup(
         keyboard=[[button_work, button_business]], 
-        resize_keyboard=True
+        resize_keyboard=True,
+        is_persistent=True # Добавлено, чтобы клавиатура не пропадала
     )
 
     await message.reply(
@@ -188,10 +204,12 @@ async def send_welcome(message: types.Message):
         reply_markup=keyboard
     )
 
-@dp.message(F.text == WORK_BUTTON) # ИСПРАВЛЕНО для aiogram v3
+@dp.message(F.text == WORK_BUTTON) 
 async def work_handler(message: types.Message):
     telegram_id = message.from_user.id
-    user = get_user_profile_sync(telegram_id, message.from_user.username, ADMIN_ID)
+    
+    # 💥 ИСПРАВЛЕНИЕ: Используем asyncio.to_thread
+    user = await to_thread(get_user_profile_sync, telegram_id, message.from_user.username, ADMIN_ID)
     
     time_since_work = datetime.now() - user.last_work_time
     
@@ -208,7 +226,9 @@ async def work_handler(message: types.Message):
     profit = random.randint(WORK_PROFIT_MIN, WORK_PROFIT_MAX)
     new_balance = user.balance + profit
     
-    update_user_sync(
+    # 💥 ИСПРАВЛЕНИЕ: Используем asyncio.to_thread
+    await to_thread(
+        update_user_sync,
         telegram_id=telegram_id,
         balance=new_balance,
         last_work_time=datetime.now()
@@ -219,28 +239,32 @@ async def work_handler(message: types.Message):
         f"Твой новый баланс: {new_balance} $."
     )
 
-@dp.message(F.text == BUSINESS_BUTTON) # ИСПРАВЛЕНО для aiogram v3
+@dp.message(F.text == BUSINESS_BUTTON) 
 async def businesses_handler(message: types.Message):
     text = "🏢 **Доступные бизнесы для покупки:**\n\n"
-    # InlineKeyboardMarkup в v3 не требует такого сильного рефакторинга
     keyboard = InlineKeyboardMarkup(row_width=1)
     
+    buttons = []
     for biz_id, biz_info in BUSINESSES.items():
         text += (
             f"🔹 **{biz_info['name']}**\n"
             f"   💰 Цена: {biz_info['cost']} $\n"
             f"   💸 Доход: {biz_info['base_profit']} $ каждые {int(biz_info['cooldown'].total_seconds() // 3600)} ч.\n"
         )
-        keyboard.add( 
+        buttons.append( 
             InlineKeyboardButton(
-                f"Купить {biz_info['name']} ({biz_info['cost']} $)",
+                text=f"Купить {biz_info['name']} ({biz_info['cost']} $)",
                 callback_data=f"buy_biz_{biz_id}"
             )
         )
+    
+    # ИСПРАВЛЕНО: Добавлено правильное создание InlineKeyboardMarkup в v3
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
+    
     await message.reply(text, reply_markup=keyboard)
 
 
-@dp.callback_query(F.data.startswith('buy_biz_')) # ИСПРАВЛЕНО для aiogram v3
+@dp.callback_query(F.data.startswith('buy_biz_')) 
 async def process_callback_buy_biz(callback_query: types.CallbackQuery):
     telegram_id = callback_query.from_user.id
     biz_id = int(callback_query.data.split('_')[2])
@@ -249,7 +273,8 @@ async def process_callback_buy_biz(callback_query: types.CallbackQuery):
     if not biz_info:
         return await bot.answer_callback_query(callback_query.id, text="Ошибка: Бизнес не найден.")
 
-    user = get_user_profile_sync(telegram_id, callback_query.from_user.username, ADMIN_ID)
+    # 💥 ИСПРАВЛЕНИЕ: Используем asyncio.to_thread
+    user = await to_thread(get_user_profile_sync, telegram_id, callback_query.from_user.username, ADMIN_ID)
     
     if user.balance < biz_info['cost']:
         return await bot.answer_callback_query(
@@ -258,7 +283,10 @@ async def process_callback_buy_biz(callback_query: types.CallbackQuery):
         )
 
     new_balance = user.balance - biz_info['cost']
-    update_user_sync(
+    
+    # 💥 ИСПРАВЛЕНИЕ: Используем asyncio.to_thread
+    await to_thread(
+        update_user_sync,
         telegram_id=telegram_id,
         balance=new_balance
     )
@@ -283,8 +311,9 @@ async def on_startup_action():
     print("Бот запускается...")
     
     if init_db():
-        scheduler.add_job(business_payout_job, 'interval', hours=1, id='business_payout_job')
-        scheduler.start()
+        # scheduler.add_job(business_payout_job, 'interval', hours=1, id='business_payout_job')
+        # scheduler.start() # Закомментировано временно, чтобы избежать ошибок планировщика, пока не будет реализован business_payout_job
+        print("Планировщик временно не запущен.")
     else:
         print("Планировщик не запущен из-за ошибки БД.")
 
@@ -303,3 +332,5 @@ if __name__ == '__main__':
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Бот остановлен вручную.")
+    except Exception as e:
+        print(f"Критическая ошибка при запуске: {e}")
