@@ -11,6 +11,7 @@ logging.basicConfig(level=logging.DEBUG,
 # Проверка на наличие зависимостей, необходимая для запуска в изолированной среде
 try:
     from aiogram import Bot, Dispatcher, types, F, Router
+    from aiogram.client.default import DefaultBotProperties
     from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
     from aiogram.filters.command import Command
     from aiogram.fsm.context import FSMContext
@@ -55,7 +56,7 @@ except Exception as e:
     sys.exit(1)
 
 # Настройка aiogram
-bot = Bot(token=BOT_TOKEN, parse_mode="Markdown")
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="Markdown"))
 dp = Dispatcher()
 router = Router()
 
