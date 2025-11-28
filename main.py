@@ -1,21 +1,19 @@
-# main.py
+# main.py - Переделано для работы с MySQL/MariaDB через DATABASE_URL
 import os
 import logging
 import random
 import datetime
 from datetime import datetime, timedelta 
 from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Boolean, DateTime, text
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.orm import declarative_base
-# ИСПРАВЛЕНО: Добавлен selectinload для решения DetachedInstanceError
-from sqlalchemy.orm import selectinload 
-# ИСПРАВЛЕНО: ИМПОРТ async.to_thread ДЛЯ НЕБЛОКИРУЮЩЕЙ РАБОТЫ С БД
+from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.exc import SQLAlchemyError 
 from asyncio import to_thread 
 
 from aiogram import Bot, Dispatcher, types, F 
-# ИСПРАВЛЕНО: Импорт ReplyKeyboardMarkup, KeyboardButton для корректной работы клавиатур v3
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton 
-from aiogram.filters import Command 
+from aiogram.filters import Command, CommandObject
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncio 
 
@@ -44,7 +42,8 @@ BUSINESSES = {
 # Кнопки
 WORK_BUTTON = "Работать 💼"
 BUSINESS_BUTTON = "Мои бизнесы 💰"
-
+CASINO_BUTTON = "Казино 🎲" 
+TOP_BUTTON = "Топ игроков 🏆" 
 
 # =========================================================
 # === 2. МОДЕЛИ БАЗЫ ДАННЫХ ===
@@ -54,19 +53,20 @@ Base = declarative_base()
 
 class User(Base):
     __tablename__ = 'users'
+    # Используем Integer для ID в MySQL, BigInteger для telegram_id
     id = Column(Integer, primary_key=True)
-    telegram_id = Column(BigInteger, unique=True, index=True)
-    username = Column(String)
+    telegram_id = Column(BigInteger, unique=True, index=True) 
+    username = Column(String(50), nullable=True) # Ограничение длины для MySQL
     balance = Column(BigInteger, default=1000)
     xp = Column(Integer, default=0)
+    # MySQL/SQLAlchemy требует явного указания типа для DATETIME
     last_work_time = Column(DateTime, default=datetime.min)
-    role = Column(String, default="Безработный")
+    role = Column(String(50), default="Безработный")
     job_id = Column(Integer, default=0)
     property_count = Column(Integer, default=0)
     is_admin = Column(Boolean, default=False)
     is_owner = Column(Boolean, default=False)
     is_president = Column(Boolean, default=False)
-    # ИСПРАВЛЕНО: Добавлен is_banned, так как он используется в send_welcome
     is_banned = Column(Boolean, default=False) 
 
 class Candidate(Base):
@@ -81,7 +81,7 @@ class OwnedBusiness(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(BigInteger, index=True)
     business_id = Column(Integer)
-    name = Column(String)
+    name = Column(String(100)) # Ограничение длины для MySQL
     count = Column(Integer, default=1)
 
 class Chat(Base):
@@ -92,36 +92,44 @@ class Chat(Base):
 
 
 # =========================================================
-# === 3. ЛОГИКА ПОДКЛЮЧЕНИЯ И СЕССИЙ ===
+# === 3. ЛОГИКА ПОДКЛЮЧЕНИЯ И СЕССИЙ (ДЛЯ MySQL) ===
 # =========================================================
 
-DB_PATH = os.environ.get("DATABASE_URL") 
-if DB_PATH and DB_PATH.startswith("postgres://"):
-    DB_PATH = DB_PATH.replace("postgres://", "postgresql://", 1)
+# В Railway переменная для MySQL будет называться MYSQL_URL. 
+# Мы используем ее или DATABASE_URL.
+DB_PATH = os.environ.get("MYSQL_URL") or os.environ.get("DATABASE_URL")
 if not DB_PATH:
+    # Fallback для локальной разработки с SQLite
     DB_PATH = "sqlite:///data/bongobot.db"
+    logging.warning("DB_PATH not found. Using local SQLite.")
+elif "mysql://" in DB_PATH:
+    # Замена префикса для SQLAlchemy и драйвера pymysql
+    DB_PATH = DB_PATH.replace("mysql://", "mysql+pymysql://", 1)
+
 
 engine = create_engine(DB_PATH, pool_pre_ping=True)
 Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db():
+    """Инициализирует БД и создает таблицы."""
     try:
-        if not Base.metadata.tables:
-            print("FATAL-DEBUG: Base.metadata пуст! Модели не определены.")
-            return False
-            
         with engine.connect() as connection:
+            # Простой запрос для проверки подключения
             connection.execute(text("SELECT 1"))
             print("БД: Подключение успешно установлено.")
         
         Base.metadata.create_all(bind=engine)
         print(f"БД: Таблицы успешно созданы (или уже существовали). Найдено моделей: {len(Base.metadata.tables)}.")
         return True
+    except SQLAlchemyError as e:
+        print(f"FATAL DB ERROR: Ошибка при инициализации БД: {e}") 
+        return False
     except Exception as e:
-        print(f"FATAL: Ошибка инициализации БД. Таблицы НЕ созданы: {e}") 
+        print(f"FATAL: Ошибка инициализации БД: {e}") 
         return False
 
-# ИСПРАВЛЕНО: Добавлено явное обращение к атрибутам для предотвращения DetachedInstanceError
+# --- Синхронные CRUD-функции ---
+
 def get_user_profile_sync(telegram_id: int, username: str, admin_id: int):
     with Session() as session:
         user = session.query(User).filter(User.telegram_id == telegram_id).first()
@@ -131,20 +139,16 @@ def get_user_profile_sync(telegram_id: int, username: str, admin_id: int):
                 telegram_id=telegram_id, 
                 username=username, 
                 is_owner=is_owner, 
+                is_admin=is_owner,
                 balance=1000
             )
-            # ИСПРАВЛЕНО: добавлен is_banned в модель, т.к. он используется в хендлере.
-            # Если бот упадет из-за отсутствия is_banned, это может быть причиной.
-            setattr(user, 'is_banned', False) 
             session.add(user)
             session.commit()
+            session.refresh(user) 
         
-        # Принудительная загрузка атрибутов перед закрытием сессии:
-        # Для корректной работы is_banned в хендлере, нам нужно его значение
-        user.is_banned = getattr(user, 'is_banned', False) # Обеспечиваем наличие атрибута
-        _ = user.username
+        # Принудительная загрузка
+        _ = user.is_banned
         _ = user.balance
-
         return user
 
 def update_user_sync(telegram_id: int, **kwargs):
@@ -165,37 +169,37 @@ def save_chat_sync(chat_id: int):
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher() # ИСПРАВЛЕНО для aiogram v3
-
+dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
+class CasinoState(StatesGroup):
+    bet_amount = State()
+
 async def business_payout_job():
-    logging.info("Выполняется работа планировщика: Выплата по бизнесам.")
+    logging.info("Выполняется работа планировщика: Выплата по бизнесам (MySQL).")
     pass 
 
 @dp.message(Command("start")) 
 async def send_welcome(message: types.Message):
-    # 💥 ИСПРАВЛЕНИЕ: Используем asyncio.to_thread для неблокирующей работы с БД
     await to_thread(save_chat_sync, message.chat.id)
     
     user = await to_thread(
         get_user_profile_sync,
         telegram_id=message.from_user.id,
-        username=message.from_user.username or message.from_user.first_name, # Используем .first_name как запасной вариант для username
+        username=message.from_user.username or message.from_user.first_name,
         admin_id=ADMIN_ID
     )
     
     if user.is_banned:
         return await message.reply("⛔️ Ты забанен и не можешь пользоваться ботом.")
     
-    # ИСПРАВЛЕНО: Создание клавиатуры ReplyKeyboardMarkup в стиле aiogram v3
-    button_work = KeyboardButton(text=WORK_BUTTON)
-    button_business = KeyboardButton(text=BUSINESS_BUTTON)
-    
     keyboard = ReplyKeyboardMarkup(
-        keyboard=[[button_work, button_business]], 
+        keyboard=[
+            [KeyboardButton(text=WORK_BUTTON), KeyboardButton(text=BUSINESS_BUTTON)],
+            [KeyboardButton(text=CASINO_BUTTON), KeyboardButton(text=TOP_BUTTON)]
+        ], 
         resize_keyboard=True,
-        is_persistent=True # Добавлено, чтобы клавиатура не пропадала
+        is_persistent=True
     )
 
     await message.reply(
@@ -207,8 +211,6 @@ async def send_welcome(message: types.Message):
 @dp.message(F.text == WORK_BUTTON) 
 async def work_handler(message: types.Message):
     telegram_id = message.from_user.id
-    
-    # 💥 ИСПРАВЛЕНИЕ: Используем asyncio.to_thread
     user = await to_thread(get_user_profile_sync, telegram_id, message.from_user.username, ADMIN_ID)
     
     time_since_work = datetime.now() - user.last_work_time
@@ -226,7 +228,6 @@ async def work_handler(message: types.Message):
     profit = random.randint(WORK_PROFIT_MIN, WORK_PROFIT_MAX)
     new_balance = user.balance + profit
     
-    # 💥 ИСПРАВЛЕНИЕ: Используем asyncio.to_thread
     await to_thread(
         update_user_sync,
         telegram_id=telegram_id,
@@ -242,7 +243,6 @@ async def work_handler(message: types.Message):
 @dp.message(F.text == BUSINESS_BUTTON) 
 async def businesses_handler(message: types.Message):
     text = "🏢 **Доступные бизнесы для покупки:**\n\n"
-    keyboard = InlineKeyboardMarkup(row_width=1)
     
     buttons = []
     for biz_id, biz_info in BUSINESSES.items():
@@ -258,7 +258,6 @@ async def businesses_handler(message: types.Message):
             )
         )
     
-    # ИСПРАВЛЕНО: Добавлено правильное создание InlineKeyboardMarkup в v3
     keyboard = InlineKeyboardMarkup(inline_keyboard=[buttons])
     
     await message.reply(text, reply_markup=keyboard)
@@ -273,7 +272,6 @@ async def process_callback_buy_biz(callback_query: types.CallbackQuery):
     if not biz_info:
         return await bot.answer_callback_query(callback_query.id, text="Ошибка: Бизнес не найден.")
 
-    # 💥 ИСПРАВЛЕНИЕ: Используем asyncio.to_thread
     user = await to_thread(get_user_profile_sync, telegram_id, callback_query.from_user.username, ADMIN_ID)
     
     if user.balance < biz_info['cost']:
@@ -282,25 +280,46 @@ async def process_callback_buy_biz(callback_query: types.CallbackQuery):
             text=f"❌ Недостаточно средств! Требуется {biz_info['cost']} $."
         )
 
-    new_balance = user.balance - biz_info['cost']
-    
-    # 💥 ИСПРАВЛЕНИЕ: Используем asyncio.to_thread
-    await to_thread(
-        update_user_sync,
-        telegram_id=telegram_id,
-        balance=new_balance
-    )
-    
-    await bot.answer_callback_query(callback_query.id, text=f"✅ Вы успешно купили {biz_info['name']}!")
-    
-    await bot.edit_message_text(
-        f"✅ **Покупка совершена!**\n"
-        f"Вы купили **{biz_info['name']}**.\n"
-        f"Новый баланс: {new_balance} $.",
-        callback_query.from_user.id,
-        callback_query.message.message_id,
-        reply_markup=None
-    )
+    # Логика покупки бизнеса
+    with Session() as session:
+        try:
+            # 1. Списание баланса
+            user_in_session = session.query(User).filter(User.telegram_id == telegram_id).first()
+            if user_in_session:
+                user_in_session.balance -= biz_info['cost']
+
+            # 2. Добавление или обновление OwnedBusiness
+            owned_biz = session.query(OwnedBusiness).filter_by(user_id=telegram_id, business_id=biz_id).first()
+            if owned_biz:
+                owned_biz.count += 1
+            else:
+                new_owned_biz = OwnedBusiness(
+                    user_id=telegram_id,
+                    business_id=biz_id,
+                    name=biz_info['name'],
+                    count=1
+                )
+                session.add(new_owned_biz)
+            
+            session.commit()
+            
+            new_balance = user.balance - biz_info['cost'] 
+            
+            await bot.answer_callback_query(callback_query.id, text=f"✅ Вы успешно купили {biz_info['name']}!")
+            
+            await bot.edit_message_text(
+                f"✅ **Покупка совершена!**\n"
+                f"Вы купили **{biz_info['name']}**.\n"
+                f"Новый баланс: {new_balance} $.",
+                telegram_id,
+                callback_query.message.message_id,
+                reply_markup=None
+            )
+            
+        except Exception as e:
+            session.rollback()
+            logging.error(f"Ошибка при покупке бизнеса (MySQL): {e}")
+            await bot.answer_callback_query(callback_query.id, text="Произошла ошибка при сохранении данных.")
 
 
 # =========================================================
@@ -308,14 +327,14 @@ async def process_callback_buy_biz(callback_query: types.CallbackQuery):
 # =========================================================
 
 async def on_startup_action(): 
-    print("Бот запускается...")
+    print("Бот запускается (MySQL)...")
     
     if init_db():
         # scheduler.add_job(business_payout_job, 'interval', hours=1, id='business_payout_job')
-        # scheduler.start() # Закомментировано временно, чтобы избежать ошибок планировщика, пока не будет реализован business_payout_job
+        # scheduler.start() 
         print("Планировщик временно не запущен.")
     else:
-        print("Планировщик не запущен из-за ошибки БД.")
+        print("Планировщик не запущен из-за критической ошибки БД.")
 
 async def main():
     if not BOT_TOKEN:
@@ -323,11 +342,12 @@ async def main():
         
     dp.startup.register(on_startup_action)
     
-    # ИСПРАВЛЕНО: Запуск polling в стиле aiogram v3
     await dp.start_polling(bot, skip_updates=True)
 
 
 if __name__ == '__main__':
+    if "sqlite" in DB_PATH:
+        os.makedirs("data", exist_ok=True)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
