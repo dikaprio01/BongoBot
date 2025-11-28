@@ -78,6 +78,26 @@ main_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
+# --- ДОБАВЬТЕ ЭТОТ БЛОК ПРИМЕРНО В СЕРЕДИНЕ ФАЙЛА, 
+# --- ГДЕ ОПРЕДЕЛЯЮТСЯ ВСЕ КЛАВИАТУРЫ (например, после main_keyboard)
+
+admin_panel_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    [
+        InlineKeyboardButton(text="Начать Набор Кандидатов", callback_data="admin_start_candidacy"),
+    ],
+    [
+        InlineKeyboardButton(text="Начать Голосование", callback_data="admin_start_voting"),
+    ],
+    [
+        InlineKeyboardButton(text="Завершить Выборы", callback_data="admin_end_election"),
+    ],
+    [
+        InlineKeyboardButton(text="Сбросить все выборы", callback_data="admin_reset_elections"),
+    ],
+    [
+        InlineKeyboardButton(text="Закрыть ❌", callback_data="close_admin_panel"),
+    ],
+])
 # Бизнесы (Расширено и улучшено)
 BUSINESSES = {
     1: {"name": "Ларек с шаурмой", "cost": 10_000, "income": 500},
