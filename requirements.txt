@@ -3,3 +3,4 @@ SQLAlchemy
 apscheduler
 psycopg2-binary
 python-dotenv
+pymysql
