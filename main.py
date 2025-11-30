@@ -22,9 +22,13 @@ try:
     from aiogram.fsm.state import State, StatesGroup
     from aiogram.exceptions import TelegramAPIError
     
+    # КОРРЕКТНЫЕ ИМПОРТЫ ДЛЯ SQLAlchemy (ИСПРАВЛЕНО)
     from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Boolean, DateTime, Float, text, ForeignKey
     from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
     from sqlalchemy.exc import SQLAlchemyError
+    from sqlalchemy.sql import func
+    from sqlalchemy.sql.functions import coalesce
+    
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
 except ImportError as e:
     logging.error(f"❌ Критическая ошибка импорта: {e}. Убедитесь, что установлены aiogram, sqlalchemy, apscheduler, pymysql.")
@@ -74,9 +78,9 @@ BTN_GOV_OFFICE = "🦅 Офис Президента"
 
 # --- Ресурсы (Товары на Бирже) ---
 MARKET_ITEMS: Dict[int, Dict] = {
-    1: {"name": "🔩 Металлолом", "base_price": 500, "volatility": 0.15},
-    2: {"name": "💎 Сырая Нефть", "base_price": 1_500, "volatility": 0.25},
-    3: {"name": "💻 Чипы", "base_price": 4_000, "volatility": 0.35},
+    1: {"name": "🔩 Металлолом", "base_price": 500, "volatility": 0.15, "id": 1},
+    2: {"name": "💎 Сырая Нефть", "base_price": 1_500, "volatility": 0.25, "id": 2},
+    3: {"name": "💻 Чипы", "base_price": 4_000, "volatility": 0.35, "id": 3},
 }
 
 # --- Бизнесы (Сложная Производственная Цепочка) ---
@@ -112,6 +116,14 @@ BUSINESSES: Dict[int, Dict] = {
         "payout_mult": 1.25
     },
 }
+
+# --- ЗАГЛУШКА ДЛЯ РАБОТЫ (JOBS) --- (Исправлено, отсутствовало в коде)
+JOBS = {
+    1: {'name': 'Младший Уборщик', 'salary': 5000},
+    2: {'name': 'Старший Уборщик', 'salary': 10000},
+    3: {'name': 'Менеджер', 'salary': 50000},
+}
+
 
 # =========================================================
 # === 2. БАЗА ДАННЫХ (ORM) ===
@@ -160,7 +172,7 @@ class BankLoan(Base):
     due_date = Column(DateTime)
     paid = Column(Boolean, default=False)
     
-    user = relationship("User", back_populates="loans")
+    user = relationship("User", back_populates="loans", primaryjoin="User.telegram_id == BankLoan.user_id")
 
 class OwnedBusiness(Base):
     __tablename__ = 'owned_businesses'
@@ -176,7 +188,7 @@ class OwnedBusiness(Base):
     production_start_time = Column(DateTime, nullable=True)
     last_collected = Column(DateTime, default=datetime.min)
     
-    user = relationship("User", back_populates="businesses")
+    user = relationship("User", back_populates="businesses", primaryjoin="User.telegram_id == OwnedBusiness.user_id")
 
 class ElectionState(Base):
     __tablename__ = 'election_state'
@@ -228,6 +240,7 @@ def init_db():
     """Инициализация базы данных, создание таблиц и первичных записей."""
     try:
         logging.info("Инициализация БД. Проверка таблиц...")
+        # Убедимся, что все отношения корректно работают (особенно ForeignKey с BigInteger)
         Base.metadata.create_all(engine)
         with SessionLocal() as s:
             if not s.query(ElectionState).first():
@@ -273,14 +286,16 @@ def get_user(telegram_id, username=None, first_name=None):
                  u.is_owner = True
                  u.is_admin = True
             s.commit()
+            s.refresh(u)
         
         # Возвращаем копию объекта (безопасность)
+        # SQLAlchemy возвращает прокси, поэтому можно возвращать u
         return u 
 
-def format_cooldown(last_time: datetime, cooldown: timedelta) -> str:
+def format_cooldown(last_time: datetime, cooldown: timedelta) -> Optional[str]:
     """Форматирует оставшееся время до конца кулдауна/таймера."""
     remaining = last_time + cooldown - datetime.now()
-    if remaining.total_seconds() < 0: return None
+    if remaining.total_seconds() <= 0: return None
     
     hours = int(remaining.total_seconds() // 3600)
     minutes = int((remaining.total_seconds() % 3600) // 60)
@@ -428,6 +443,9 @@ async def cmd_profile(message: types.Message):
             left = format_cooldown(datetime.now(), u.arrest_expires - datetime.now())
             arrest_info = f"\n🚨 **В ТЮРЬМЕ**: осталось {left}"
 
+        # Защита от отсутствия уровня работы
+        job_name = JOBS.get(u.job_level, {'name': 'Безработный'}).get('name')
+
         info = (
             f"👤 *Профиль: {u.first_name}*\n"
             f"ID: `{u.telegram_id}` | **{status}**\n\n"
@@ -437,7 +455,7 @@ async def cmd_profile(message: types.Message):
             f"💸 Активных Кредитов: **{active_loans}**\n"
             f"🏛 Гос. Налог: {int(tax_rate*100)}%\n"
             f"--- ⚙️ Статус ---\n"
-            f"🛠 Текущая Работа: {JOBS[u.job_level]['name']}\n"
+            f"🛠 Текущая Работа: {job_name}\n" # ИСПРАВЛЕНО
             f"{arrest_info}"
         )
             
@@ -468,12 +486,13 @@ async def cmd_top(message: types.Message):
 # --- Помощь ---
 @router.message(F.text == "💞 Помощь")
 async def cmd_help(message: types.Message):
+    u = get_user(message.from_user.id)
     await message.answer(
         "✨ *Помощь и Информация*\n\n"
         "**Система Бизнеса:** Для получения дохода ваши бизнесы теперь требуют *Сырья*. Купите его на Бирже, запустите производство, и через некоторое время соберите готовую продукцию.\n\n"
         "**Банк:** Вы можете брать кредиты с ежедневным начислением процентов. Неуплата приводит к штрафам!\n\n"
         "**Политика:** Президент управляет Госбюджетом и устанавливает Налоги и Кредитную Ставку.",
-        reply_markup=get_main_kb(get_user(message.from_user.id).is_admin, get_user(message.from_user.id).is_president)
+        reply_markup=get_main_kb(u.is_admin, u.is_president)
     )
 
 # =========================================================
@@ -506,67 +525,121 @@ async def bank_deposit_start(call: types.CallbackQuery, state: FSMContext):
 
 @router.message(GameStates.bank_deposit)
 async def bank_deposit_finish(message: types.Message, state: FSMContext):
-    await state.clear()
     uid = message.from_user.id
     try: amount = int(message.text)
-    except: return await message.answer("❌ Введите число.", reply_markup=get_main_kb())
+    except:
+        await state.clear()
+        return await message.answer("❌ Введите число.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
 
-    try:
-        with SessionLocal() as s:
-            u = s.query(User).filter_by(telegram_id=uid).with_for_update().first()
-            if u.balance < amount: return await message.answer(f"❌ Не хватает наличных. На счету: {u.balance:,}$")
+    with SessionLocal() as s:
+        u = s.query(User).filter_by(telegram_id=uid).with_for_update().first()
+        
+        if amount <= 0:
+             await state.clear()
+             return await message.answer("❌ Сумма должна быть положительной.", reply_markup=get_main_kb(u.is_admin, u.is_president))
+        
+        fee = int(amount * BANK_FEE_RATE)
+        net_amount = amount - fee
+        
+        if u.balance < amount:
+             await state.clear()
+             return await message.answer(f"❌ Не хватает наличных. У вас: {u.balance:,}$", reply_markup=get_main_kb(u.is_admin, u.is_president))
 
-            fee = int(amount * BANK_FEE_RATE)
-            net_amount = amount - fee
-            
-            u.balance -= amount
-            u.bank_balance += net_amount
-            s.commit()
-            await message.answer(f"✅ Депозит: +{net_amount:,}$ (комиссия: {fee:,}$)")
-    except SQLAlchemyError:
-        await message.answer("❌ Ошибка БД.")
-    finally: await message.answer("Возврат в меню.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
+        u.balance -= amount
+        u.bank_balance += net_amount
+        s.commit()
+        
+        await state.clear()
+        await message.answer(
+            f"✅ **Депозит Успешен!**\n"
+            f"Сумма: +{net_amount:,}$ (Счет)\n"
+            f"Комиссия: -{fee:,}$ (Налог)\n"
+            f"Остаток: {u.balance:,}$ (Наличные)",
+            reply_markup=get_main_kb(u.is_admin, u.is_president)
+        )
 
-# --- Кредитная Система ---
+@router.callback_query(F.data == "bank_withdraw_start")
+async def bank_withdraw_start(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
+    await state.set_state(GameStates.bank_withdraw)
+    await call.message.edit_text("📤 Введите сумму для снятия (банк -> наличные):")
+
+@router.message(GameStates.bank_withdraw)
+async def bank_withdraw_finish(message: types.Message, state: FSMContext):
+    uid = message.from_user.id
+    try: amount = int(message.text)
+    except:
+        await state.clear()
+        return await message.answer("❌ Введите число.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
+
+    with SessionLocal() as s:
+        u = s.query(User).filter_by(telegram_id=uid).with_for_update().first()
+        
+        if amount <= 0:
+            await state.clear()
+            return await message.answer("❌ Сумма должна быть положительной.", reply_markup=get_main_kb(u.is_admin, u.is_president))
+        
+        fee = int(amount * BANK_FEE_RATE)
+        net_amount = amount - fee
+        
+        if u.bank_balance < amount:
+            await state.clear()
+            return await message.answer(f"❌ Не хватает на счету. На счету: {u.bank_balance:,}$", reply_markup=get_main_kb(u.is_admin, u.is_president))
+
+        u.bank_balance -= amount
+        u.balance += net_amount
+        s.commit()
+        
+        await state.clear()
+        await message.answer(
+            f"✅ **Снятие Успешно!**\n"
+            f"Сумма: +{net_amount:,}$ (Наличные)\n"
+            f"Комиссия: -{fee:,}$ (Налог)\n"
+            f"Остаток: {u.bank_balance:,}$ (Счет)",
+            reply_markup=get_main_kb(u.is_admin, u.is_president)
+        )
+
+
 @router.callback_query(F.data == "loan_request_start")
 async def loan_request_start(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
     uid = call.from_user.id
     
     with SessionLocal() as s:
-        # Проверка на наличие текущих кредитов
+        u = s.query(User).filter_by(telegram_id=uid).first()
         active_loans = s.query(BankLoan).filter_by(user_id=uid, paid=False).count()
-        if active_loans >= 3:
-            return await call.message.answer("❌ Вы не можете взять более 3 активных кредитов одновременно.")
-        
-        u = get_user(uid)
-        max_loan = u.balance * MAX_LOAN_AMOUNT_MULTIPLIER
+        max_loan_amount = u.balance * MAX_LOAN_AMOUNT_MULTIPLIER
         rate = get_current_loan_interest(s)
-    
-    await state.set_state(GameStates.loan_request)
-    await state.update_data(rate=rate)
-    await call.message.edit_text(
-        f"💸 **Запрос Кредита**\n"
-        f"Максимальная сумма: {max_loan:,}$\n"
-        f"Ставка (за {LOAN_CYCLE_DAYS} дн.): {int(rate*100)}%\n"
-        f"Введите желаемую сумму кредита:"
-    )
+        
+        if active_loans >= 3:
+             return await call.message.answer("❌ У вас слишком много активных кредитов (Максимум 3).")
+        
+        await state.set_state(GameStates.loan_request)
+        await state.update_data(rate=rate, max_loan=max_loan_amount)
+        
+        await call.message.edit_text(
+            f"🏦 **Запрос Кредита**\n"
+            f"Текущая ставка: {int(rate*100)}% (за {LOAN_CYCLE_DAYS} день).\n"
+            f"Максимальная сумма: {max_loan_amount:,}$ (10x от наличных).\n"
+            f"Введите желаемую сумму кредита:"
+        )
+
 
 @router.message(GameStates.loan_request)
 async def loan_request_finish(message: types.Message, state: FSMContext):
+    uid = message.from_user.id
     data = await state.get_data()
     await state.clear()
-    uid = message.from_user.id
     
     try: amount = int(message.text)
-    except: return await message.answer("❌ Введите число.", reply_markup=get_main_kb())
+    except: return await message.answer("❌ Введите число.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
 
     with SessionLocal() as s:
         u = s.query(User).filter_by(telegram_id=uid).with_for_update().first()
-        max_loan = u.balance * MAX_LOAN_AMOUNT_MULTIPLIER
+        max_loan = data.get('max_loan', 0) # Используем сохраненный максимум
         
         if amount <= 1000 or amount > max_loan:
-             return await message.answer(f"❌ Сумма должна быть между 1,000$ и {max_loan:,}$.", reply_markup=get_main_kb())
+             return await message.answer(f"❌ Сумма должна быть между 1,000$ и {max_loan:,}$.", reply_markup=get_main_kb(u.is_admin, u.is_president))
         
         rate = data.get('rate', DEFAULT_LOAN_INTEREST_RATE)
         due_date = datetime.now() + timedelta(days=LOAN_CYCLE_DAYS)
@@ -606,7 +679,11 @@ async def loan_pay_start(call: types.CallbackQuery, state: FSMContext):
         for loan in loans:
             # Начисление текущего процента (просто для отображения)
             days_passed = (datetime.now() - loan.issue_date).days
-            total_interest = loan.amount * loan.interest_rate * max(1, days_passed)
+            # Минимум 1 цикл для начисления процентов
+            cycles = max(1, days_passed // LOAN_CYCLE_DAYS)
+
+            # Проценты начисляются только за прошедшие полные циклы.
+            total_interest = loan.amount * loan.interest_rate * cycles
             total_payback = loan.amount + total_interest
             
             text += f"ID {loan.id}. Сумма: {loan.amount:,}$, %: {int(loan.interest_rate*100)}%, К возврату: {total_payback:,.0f}$\n"
@@ -694,7 +771,8 @@ async def biz_stat(call: types.CallbackQuery):
         if not bizs:
             return await call.message.answer("У вас пока нет бизнесов.")
         
-        info = "📊 **Ваши Производственные Активы** (Налог: {int(tax_rate*100)}%)\n"
+        # ИСПРАВЛЕН синтаксис f-строки
+        info = f"📊 **Ваши Производственные Активы** (Налог: {int(tax_rate*100)}%)\n"
         
         for b in bizs:
             biz_info = BUSINESSES.get(b.business_id)
@@ -711,6 +789,7 @@ async def biz_stat(call: types.CallbackQuery):
                 production_status = f"Требуется {biz_info['resource_per_cycle'] * b.count} x {resource_info['name']}"
             elif b.production_state == "PRODUCING" and b.production_start_time:
                 status_emoji = "⏳"
+                # Используем timedelta в format_cooldown
                 remaining = format_cooldown(b.production_start_time, timedelta(hours=PRODUCTION_CYCLE_HOURS))
                 production_status = f"Производство. Осталось: {remaining}"
             elif b.production_state == "READY":
@@ -747,13 +826,12 @@ async def biz_start_prod_select(call: types.CallbackQuery):
             # Проверяем, сколько сырья нужно для одного полного цикла (для всех объектов этого типа)
             required_res = biz_info['resource_per_cycle'] * b.count
             
+            status = "➕"
             if b.production_state == "PRODUCING":
                  status = "⏳"
             elif b.production_state == "READY":
                  status = "✅"
-            else: # IDLE
-                 status = "➕"
-
+            
             kb.inline_keyboard.append([
                 InlineKeyboardButton(
                     text=f"{status} {biz_info['name']} (x{b.count}) | Запас: {b.resource_stock} | Нужно: {required_res} x {res_name}",
@@ -774,7 +852,9 @@ async def biz_res_input_start(call: types.CallbackQuery, state: FSMContext):
         
         biz_info = BUSINESSES.get(b.business_id)
         res_info = MARKET_ITEMS.get(biz_info['req_resource_id'])
-        current_price = s.query(MarketItemPrice).filter_by(item_id=res_info['id']).first().current_price
+        # ИСПРАВЛЕНА потенциальная ошибка, если цена не найдена
+        market_price_obj = s.query(MarketItemPrice).filter_by(item_id=res_info['id']).first()
+        current_price = market_price_obj.current_price if market_price_obj else res_info['base_price']
         
         # Кол-во сырья для 1 полного цикла
         required_res = biz_info['resource_per_cycle'] * b.count
@@ -796,7 +876,7 @@ async def biz_res_input_finish(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     
     try: units_to_buy = int(message.text)
-    except: return await message.answer("❌ Введите число.", reply_markup=get_main_kb())
+    except: return await message.answer("❌ Введите число.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
 
     biz_db_id = data['biz_db_id']
     price = data['price']
@@ -818,14 +898,15 @@ async def biz_res_input_finish(message: types.Message, state: FSMContext):
             biz_info = BUSINESSES.get(b.business_id)
             required_res = biz_info['resource_per_cycle'] * b.count
             
+            msg_prod = f"Запас сырья: {b.resource_stock} ед."
+            
+            # Логика запуска, если IDLE и достаточно сырья
             if b.production_state == "IDLE" and b.resource_stock >= required_res:
                  b.production_state = "PRODUCING"
                  b.resource_stock -= required_res
                  b.production_start_time = datetime.now()
                  msg_prod = "🏭 *Производство запущено!*"
-            else:
-                 msg_prod = f"Запас сырья: {b.resource_stock} ед."
-
+            
             s.commit()
             
             await message.answer(
@@ -838,6 +919,10 @@ async def biz_res_input_finish(message: types.Message, state: FSMContext):
     except SQLAlchemyError as e:
         logging.error(f"Biz Resource DB Error: {e}")
         await message.answer("❌ Ошибка БД при покупке сырья.")
+    except Exception as e:
+        # Ловим другие ошибки, чтобы не сломать FSM
+        logging.error(f"Biz Resource General Error: {e}")
+        await message.answer("❌ Произошла внутренняя ошибка.")
     finally: await message.answer("Возврат в меню.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
 
 # --- Сбор готовой продукции ---
@@ -848,6 +933,7 @@ async def biz_collect_all(call: types.CallbackQuery):
     
     total_income_net = 0
     collected_units = 0
+    total_tax = 0 # Новая переменная для расчета налога
     
     try:
         with SessionLocal() as s:
@@ -870,6 +956,7 @@ async def biz_collect_all(call: types.CallbackQuery):
                 net_payout = raw_payout - tax_amount
                 
                 total_income_net += net_payout
+                total_tax += tax_amount
                 collected_units += b.count
                 
                 # Сброс состояния и попытка повторного запуска
@@ -886,13 +973,14 @@ async def biz_collect_all(call: types.CallbackQuery):
                 
                 # Налоговые отчисления идут в госбюджет
                 budget = s.query(PresidentialBudget).with_for_update().first()
-                budget.budget += int(total_income_net * tax_rate / (1-tax_rate)) # (Обратный расчет налога)
+                budget.budget += total_tax 
 
                 s.commit()
                 await call.message.answer(
                     f"💸 **Сбор Продукции Успешен!**\n"
                     f"Собрано {collected_units} ед. продукции.\n"
-                    f"💰 Чистый доход (после налога {int(tax_rate*100)}%): *{total_income_net:,} $*\n"
+                    f"💰 Налог ({int(tax_rate*100)}%): *-{total_tax:,} $*\n"
+                    f"💲 Чистый доход: *+{total_income_net:,} $*\n"
                 )
             else:
                 await call.message.answer("⏳ Нет готовой продукции для сбора.")
@@ -935,6 +1023,7 @@ async def biz_buy(call: types.CallbackQuery):
             if exist:
                 exist.count += 1
             else:
+                # ВАЖНО: user_id в OwnedBusiness - это BigInteger (telegram_id)
                 s.add(OwnedBusiness(user_id=uid, business_id=bid, count=1))
             s.commit()
             
@@ -965,7 +1054,8 @@ async def biz_upgrade_start(call: types.CallbackQuery):
             
             if current_level >= max_level:
                 btn_text = f"⭐ {biz_info['name']} | Уровень {current_level} (MAX)"
-                kb.inline_keyboard.append([InlineKeyboardButton(text=btn_text, callback_data="no_action")])
+                # ИСПРАВЛЕНО: callback_data должен быть уникальным
+                kb.inline_keyboard.append([InlineKeyboardButton(text=btn_text, callback_data=f"biz_upgrade_max_{b.id}")])
             else:
                 # Стоимость следующего уровня = Базовая стоимость * (Мультипликатор)^текущий_уровень
                 cost_to_upgrade = int(biz_info['cost'] * (biz_info['upgrade_cost_mult'] ** current_level))
@@ -987,9 +1077,12 @@ async def biz_upgrade_start(call: types.CallbackQuery):
 async def biz_upgrade_do(call: types.CallbackQuery):
     await call.answer()
     uid = call.from_user.id
-    _, _, biz_db_id_str, cost_str = call.data.split('_')
-    biz_db_id = int(biz_db_id_str)
-    cost = int(cost_str)
+    try:
+        _, _, biz_db_id_str, cost_str = call.data.split('_')
+        biz_db_id = int(biz_db_id_str)
+        cost = int(cost_str)
+    except ValueError:
+        return await call.message.answer("❌ Ошибка обработки данных улучшения.")
     
     try:
         with SessionLocal() as s:
@@ -1028,6 +1121,79 @@ async def cmd_work_menu(message: types.Message):
     await message.answer("🛠 *Работа (базовый доход)*: логика в этом релизе не менялась. Выполните работу.",
                          reply_markup=get_main_kb(u.is_admin, u.is_president))
 
+@router.message(F.text == "🎁 Бонус")
+async def cmd_daily_bonus(message: types.Message):
+    u = get_user(message.from_user.id)
+    cooldown = timedelta(hours=24)
+    rem = format_cooldown(u.last_daily_bonus, cooldown)
+    
+    if rem:
+        return await message.answer(f"⏳ Следующий бонус можно получить через {rem}.", reply_markup=get_main_kb(u.is_admin, u.is_president))
+
+    with SessionLocal() as s:
+        u_db = s.query(User).filter_by(telegram_id=u.telegram_id).with_for_update().first()
+        u_db.balance += DAILY_BONUS_AMOUNT
+        u_db.last_daily_bonus = datetime.now()
+        s.commit()
+        
+        await message.answer(
+            f"🎉 **Ежедневный Бонус!** Вы получили *{DAILY_BONUS_AMOUNT:,} $*\n"
+            f"Текущий баланс: {u_db.balance:,}$",
+            reply_markup=get_main_kb(u.is_admin, u.is_president)
+        )
+
+# --- Казино ---
+@router.message(F.text == "🎰 Казино")
+async def cmd_casino(message: types.Message, state: FSMContext):
+    u = get_user(message.from_user.id)
+    await state.set_state(GameStates.casino_bet)
+    await message.answer(
+        f"🎰 **Казино BongoCity**\n"
+        f"У вас: {u.balance:,} $\n"
+        f"Минимальная ставка: {CASINO_MIN_BET:,} $\n"
+        f"Введите сумму ставки (0 для отмены):"
+    )
+
+@router.message(GameStates.casino_bet)
+async def casino_finish(message: types.Message, state: FSMContext):
+    uid = message.from_user.id
+    try: bet = int(message.text)
+    except:
+        await state.clear()
+        return await message.answer("❌ Введите число.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
+
+    await state.clear()
+    
+    if bet == 0:
+        return await message.answer("Отменено.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
+
+    if bet < CASINO_MIN_BET:
+        return await message.answer(f"❌ Минимальная ставка: {CASINO_MIN_BET:,}$", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
+        
+    with SessionLocal() as s:
+        u = s.query(User).filter_by(telegram_id=uid).with_for_update().first()
+        
+        if u.balance < bet:
+            return await message.answer(f"❌ Не хватает наличных. У вас: {u.balance:,}$", reply_markup=get_main_kb(u.is_admin, u.is_president))
+        
+        # Игра
+        multiplier = random.choice([0, 0, 0, 0, 0, 0.5, 1.5, 2.0, 3.0]) # 6/9 проигрыш или меньший выигрыш
+        
+        if multiplier == 0:
+            u.balance -= bet
+            msg = f"💔 **ПРОИГРЫШ!** Вы потеряли *-{bet:,} $*. Остаток: {u.balance:,}$"
+        elif multiplier == 0.5:
+            loss = int(bet * 0.5)
+            u.balance -= loss
+            msg = f"📉 **МИНУС!** Вы потеряли *-{loss:,} $*. Остаток: {u.balance:,}$"
+        else:
+            win = int(bet * multiplier)
+            u.balance += win
+            msg = f"🎉 **ПОБЕДА!** Ваш выигрыш: *+{win:,} $*. Остаток: {u.balance:,}$"
+            
+        s.commit()
+        await message.answer(msg, reply_markup=get_main_kb(u.is_admin, u.is_president))
+
 # =========================================================
 # === 8. БИРЖА РЕСУРСОВ (ДИНАМИЧЕСКИЕ ЦЕНЫ) ===
 # =========================================================
@@ -1061,7 +1227,9 @@ async def market_buy_start(call: types.CallbackQuery, state: FSMContext):
 async def cmd_crime(message: types.Message):
     u = get_user(message.from_user.id)
     if u.arrest_expires and u.arrest_expires > datetime.now():
-        return await message.answer("🔒 Вы в тюрьме. Криминальная деятельность невозможна.")
+        # ИСПРАВЛЕНО: format_cooldown принимает datetime.now() как last_time для jail
+        left = format_cooldown(datetime.now(), u.arrest_expires - datetime.now())
+        return await message.answer(f"🔒 Вы в тюрьме. Осталось: {left}")
     
     cooldown = timedelta(hours=6)
     rem = format_cooldown(u.last_crime_time, cooldown)
@@ -1074,6 +1242,10 @@ async def cmd_crime(message: types.Message):
     # Ставка (минимальная сумма, которую можно потерять)
     bet = u.balance / 10 # 10% от наличного баланса
     if bet < CASINO_MIN_BET: bet = CASINO_MIN_BET
+    
+    # Защита от нулевого баланса
+    if u.balance < CASINO_MIN_BET:
+        return await message.answer("❌ У вас слишком мало наличных для ограбления. Нужно хотя бы 10,000$.")
     
     try:
         with SessionLocal() as s:
@@ -1089,6 +1261,11 @@ async def cmd_crime(message: types.Message):
                 # Провал
                 # Штраф и тюрьма
                 fine_amount = int(bet * CRIME_FINE_MULTIPLIER)
+                
+                # Защита от отрицательного баланса (если штраф больше нал.)
+                if u_db.balance < fine_amount:
+                    fine_amount = u_db.balance # Списываем все, что есть
+                    
                 u_db.balance -= fine_amount
                 u_db.arrest_expires = datetime.now() + timedelta(minutes=CRIME_JAIL_TIME_MINUTES)
                 
@@ -1156,16 +1333,17 @@ async def pres_tax_finish(message: types.Message, state: FSMContext):
     await state.clear()
     
     try: tax_perc = float(message.text)
-    except: return await message.answer("❌ Введите число.", reply_markup=get_main_kb())
+    except: return await message.answer("❌ Введите число.", reply_markup=get_main_kb(get_user(message.from_user.id).is_admin, get_user(message.from_user.id).is_president))
 
     if not 0 <= tax_perc <= (TAX_MAX_RATE * 100):
-        return await message.answer(f"❌ Налог должен быть от 0 до {int(TAX_MAX_RATE*100)}%.", reply_markup=get_main_kb())
+        return await message.answer(f"❌ Налог должен быть от 0 до {int(TAX_MAX_RATE*100)}%.", reply_markup=get_main_kb(get_user(message.from_user.id).is_admin, get_user(message.from_user.id).is_president))
     
+    u = get_user(message.from_user.id)
     with SessionLocal() as s:
         est = s.query(ElectionState).with_for_update().first()
         est.tax_rate = tax_perc / 100.0
         s.commit()
-        await message.answer(f"✅ Налог установлен на {tax_perc}%.", reply_markup=get_main_kb(is_president=True))
+        await message.answer(f"✅ Налог установлен на {tax_perc}%.", reply_markup=get_main_kb(u.is_admin, u.is_president))
 
 # --- FSM для изменения кредитной ставки ---
 @router.callback_query(F.data == "pres_loan_rate_start")
@@ -1181,16 +1359,17 @@ async def pres_loan_rate_finish(message: types.Message, state: FSMContext):
     await state.clear()
     
     try: rate_perc = float(message.text)
-    except: return await message.answer("❌ Введите число.", reply_markup=get_main_kb())
+    except: return await message.answer("❌ Введите число.", reply_markup=get_main_kb(get_user(message.from_user.id).is_admin, get_user(message.from_user.id).is_president))
 
     if not 0 <= rate_perc <= 100:
-        return await message.answer(f"❌ Ставка должна быть от 0% до 100%.", reply_markup=get_main_kb())
+        return await message.answer(f"❌ Ставка должна быть от 0% до 100%.", reply_markup=get_main_kb(get_user(message.from_user.id).is_admin, get_user(message.from_user.id).is_president))
     
+    u = get_user(message.from_user.id)
     with SessionLocal() as s:
         est = s.query(ElectionState).with_for_update().first()
         est.loan_interest_rate = rate_perc / 100.0
         s.commit()
-        await message.answer(f"✅ Кредитная ставка установлена на {rate_perc}%.", reply_markup=get_main_kb(is_president=True))
+        await message.answer(f"✅ Кредитная ставка установлена на {rate_perc}%.", reply_markup=get_main_kb(u.is_admin, u.is_president))
 
 # --- FSM для выдачи средств из госбюджета ---
 @router.callback_query(F.data == "pres_give_budget_start")
@@ -1220,9 +1399,10 @@ async def pres_give_budget_finish(message: types.Message, state: FSMContext):
         return await message.answer("❌ Неверный формат ввода (ожидался: ID сумма).", reply_markup=get_main_kb(is_president=True))
         
     try:
+        u_pres = get_user(pres_id)
+        if not u_pres.is_president: raise PermissionError("Not president")
+        
         with SessionLocal() as s:
-            u_pres = s.query(User).filter_by(telegram_id=pres_id).first()
-            if not u_pres or not u_pres.is_president: raise PermissionError("Not president")
             
             budget = s.query(PresidentialBudget).with_for_update().first()
             u_target = s.query(User).filter_by(telegram_id=target_id).with_for_update().first()
@@ -1239,7 +1419,7 @@ async def pres_give_budget_finish(message: types.Message, state: FSMContext):
             await bot.send_message(target_id, f"🚨 Президент выдал вам {amount:,}$ из Государственного Бюджета.")
 
     except Exception as e:
-        await message.answer(f"❌ Ошибка: Внутренняя ошибка или недостаточно прав.", reply_markup=get_main_kb(is_president=True))
+        await message.answer(f"❌ Ошибка: Внутренняя ошибка или недостаточно прав.", reply_markup=get_main_kb(get_user(pres_id).is_admin, get_user(pres_id).is_president))
         logging.error(f"Pres Budget FSM Error: {e}")
         
     finally: await message.answer("Возврат в меню.", reply_markup=get_main_kb(get_user(pres_id).is_admin, get_user(pres_id).is_president))
@@ -1251,6 +1431,7 @@ async def pres_give_budget_finish(message: types.Message, state: FSMContext):
 async def check_elections_and_payouts():
     """Фоновая проверка: выборы, производство, кредиты, динамика рынка."""
     logging.info("Scheduler: Checking all background timers...")
+    now = datetime.now() # Определяем время один раз
     
     # --- A. Динамика Рынка ---
     with SessionLocal() as s:
@@ -1267,7 +1448,7 @@ async def check_elections_and_payouts():
         # --- B. Проверка Производства ---
         bizs_in_prod = s.query(OwnedBusiness).filter_by(production_state="PRODUCING").with_for_update().all()
         for b in bizs_in_prod:
-            if b.production_start_time and datetime.now() - b.production_start_time >= timedelta(hours=PRODUCTION_CYCLE_HOURS):
+            if b.production_start_time and now - b.production_start_time >= timedelta(hours=PRODUCTION_CYCLE_HOURS):
                 b.production_state = "READY"
                 # Отправка уведомления пользователю
                 biz_name = BUSINESSES.get(b.business_id)['name']
@@ -1280,16 +1461,16 @@ async def check_elections_and_payouts():
         loans = s.query(BankLoan).filter_by(paid=False).with_for_update().all()
         for loan in loans:
             # Проверка на просрочку
-            if datetime.now() > loan.due_date:
+            if now > loan.due_date:
                 # Если просрочено, штрафуем (переводим налог в Госбюджет)
-                loan_days_overdue = (datetime.now() - loan.due_date).days
+                loan_days_overdue = (now - loan.due_date).days
                 if loan_days_overdue > 0 and loan_days_overdue % LOAN_CYCLE_DAYS == 0:
                     budget = s.query(PresidentialBudget).with_for_update().first()
                     fine_amount = int(loan.amount * loan.interest_rate * 2) # Двойной процент за просрочку
                     
                     u = s.query(User).filter_by(telegram_id=loan.user_id).with_for_update().first()
                     
-                    if u.bank_balance >= fine_amount:
+                    if u and u.bank_balance >= fine_amount:
                         u.bank_balance -= fine_amount
                         budget.budget += fine_amount
                         try:
@@ -1345,7 +1526,38 @@ async def set_bot_commands(bot: Bot):
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
 
 # =========================================================
-# === 12. ЗАПУСК БОТА ===
+# === 12. ГЛАВНЫЕ ОБРАБОТЧИКИ ОШИБОК И ЗАПУСК БОТА ===
+# =========================================================
+
+# --- ИСПРАВЛЕНИЕ: Catch-all Handler для сброса FSM и ловли неизвестных команд ---
+@router.message()
+async def unhandled_message(message: types.Message, state: FSMContext):
+    """
+    Ловит любые сообщения, которые не были обработаны другими хэндлерами.
+    Сбрасывает FSM-состояние на всякий случай и предлагает помощь.
+    """
+    current_state = await state.get_state()
+    if current_state:
+        # Если находились в FSM, сбрасываем его
+        await state.clear()
+        
+    u = get_user(message.from_user.id)
+    await message.answer(
+        "🤔 *Неизвестная команда или некорректный ввод.*\n"
+        "Ваше состояние было сброшено. Пожалуйста, воспользуйтесь кнопками ниже.",
+        reply_markup=get_main_kb(u.is_admin, u.is_president)
+    )
+
+# --- Ловля всех Callback-ошибок (чтобы не было "not handled") ---
+@router.callback_query()
+async def unhandled_callback(call: types.CallbackQuery):
+    await call.answer("❌ Эта кнопка устарела или не существует.", show_alert=True)
+    u = get_user(call.from_user.id)
+    # Возвращаем главное меню на всякий случай
+    await call.message.answer("Возвращено Главное Меню.", reply_markup=get_main_kb(u.is_admin, u.is_president))
+
+# =========================================================
+# === 13. ЗАПУСК БОТА ===
 # =========================================================
 
 async def main():
@@ -1361,13 +1573,10 @@ async def main():
     
     scheduler.start()
     logging.info("Бот запущен. Сложная симуляция активна.")
+    # ИСПОЛЬЗУЕМ dp.start_polling(bot) - это правильно для aiogram 3.x
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    # Дополнительные импорты для сложной ORM-логики (требуются для func.sum и coalesce)
-    from sqlalchemy.sql import func
-    from sqlalchemy.sql.functions import coalesce
-
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
