@@ -30,8 +30,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 # =========================================================
 
 # Установите свой токен бота и URL базы данных
-TOKEN = "YOUR_BOT_TOKEN_HERE"
-DB_URL = "sqlite:///bongo_city.db" # Можно использовать PostgreSQL/MySQL для продакшна
+TOKEN = os.getenv("BOT_TOKEN")
+MYSQL_URL = os.getenv("MYSQL_URL") # Можно использовать PostgreSQL/MySQL для продакшна
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -44,7 +44,7 @@ dp.include_router(router)
 scheduler = AsyncIOScheduler()
 
 # Инициализация БД
-engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
+engine = create_engine(MYSQL_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
