@@ -1,974 +1,816 @@
-import os
+# =========================================================
+# === BongoCity Telegram Bot: Полный Код (Python/aiogram) ===
+# =========================================================
+
 import logging
 import random
 import asyncio
-import sys
 from datetime import datetime, timedelta
-from typing import Optional, Dict
 
-# --- Настройка Логирования ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+# --- Aiogram Imports ---
+from aiogram import Bot, Dispatcher, Router, types, F
+from aiogram.enums import ParseMode
+from aiogram.filters import CommandStart, Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton,
+    ReplyKeyboardMarkup, BotCommand, BotCommandScopeDefault
 )
+from aiogram.exceptions import TelegramAPIError
 
-# --- Проверка Импортов ---
-try:
-    from aiogram import Bot, Dispatcher, types, F, Router
-    from aiogram.client.default import DefaultBotProperties 
-    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton, BotCommand, BotCommandScopeDefault
-    from aiogram.filters import Command, CommandObject
-    from aiogram.fsm.context import FSMContext
-    from aiogram.fsm.state import State, StatesGroup
-    from aiogram.exceptions import TelegramAPIError
-    
-    # КОРРЕКТНЫЕ ИМПОРТЫ ДЛЯ SQLAlchemy (ИСПРАВЛЕНО)
-    from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Boolean, DateTime, Float, text, ForeignKey
-    from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
-    from sqlalchemy.exc import SQLAlchemyError
-    from sqlalchemy.sql import func
-    from sqlalchemy.sql.functions import coalesce
-    
-    from apscheduler.schedulers.asyncio import AsyncIOScheduler
-except ImportError as e:
-    logging.error(f"❌ Критическая ошибка импорта: {e}. Убедитесь, что установлены aiogram, sqlalchemy, apscheduler, pymysql.")
-    sys.exit(1)
+# --- SQLAlchemy Imports ---
+from sqlalchemy import create_engine, Column, Integer, String, BigInteger, Float, DateTime, Boolean
+from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.exc import SQLAlchemyError
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # =========================================================
-# === 1. КОНФИГУРАЦИЯ И КОНСТАНТЫ ИГРЫ (УСИЛЕННЫЕ) ===
+# === 1. КОНФИГУРАЦИЯ И ИНИЦИАЛИЗАЦИЯ ===
 # =========================================================
 
-# --- Глобальные настройки ---
-OWNER_ID = 1871352653  # Ваш ID
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-DB_PATH = os.environ.get("MYSQL_URL") or os.environ.get("DATABASE_URL")
+# Установите свой токен бота и URL базы данных
+TOKEN = "YOUR_BOT_TOKEN_HERE"
+DB_URL = "sqlite:///bongo_city.db" # Можно использовать PostgreSQL/MySQL для продакшна
 
-if not BOT_TOKEN or not DB_PATH:
-    logging.error("❌ НЕ НАЙДЕНЫ BOT_TOKEN или DATABASE_URL. Проверьте переменные окружения.")
-    sys.exit(1)
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Преобразование для SQLAlchemy (требуется PyMySQL)
-if "mysql://" in DB_PATH:
-    DB_PATH = DB_PATH.replace("mysql://", "mysql+pymysql://", 1)
-
-# --- Настройки Экономики, Финансов и Политики ---
-STARTING_BALANCE = 500_000 # Высокий стартовый баланс для соответствия новым ценам
-DAILY_BONUS_AMOUNT = 15_000
-CASINO_MIN_BET = 10_000
-CRIME_FINE_MULTIPLIER = 5 # Штраф = 5x от ставки
-CRIME_JAIL_TIME_MINUTES = 30 # Время в тюрьме за неудачное ограбление
-
-# Финансы
-DEFAULT_LOAN_INTEREST_RATE = 0.05 # 5% за 24 часа
-BANK_INTEREST_RATE = 0.001 # 0.1% пассивного начисления в сутки (для депозитов)
-BANK_FEE_RATE = 0.005 # 0.5% комиссия за операции (депозит/снятие)
-TAX_MAX_RATE = 0.40
-MAX_LOAN_AMOUNT_MULTIPLIER = 10 # Максимальный кредит = 10x от текущего баланса
-
-# Временные интервалы
-PRODUCTION_CYCLE_HOURS = 4 # Время, необходимое бизнесу для производства
-COLLECTION_CYCLE_HOURS = 24 # Максимальный период, за который можно собрать доход
-LOAN_CYCLE_DAYS = 1 # Срок кредита
-
-# --- Кнопки (Меню) ---
-BTN_MARKET = "📈 Биржа Ресурсов"
-BTN_CRIME = "🔫 Криминал"
-BTN_LOAN = "🏦 Взять Кредит"
-BTN_GOV_OFFICE = "🦅 Офис Президента"
-
-# --- Ресурсы (Товары на Бирже) ---
-MARKET_ITEMS: Dict[int, Dict] = {
-    1: {"name": "🔩 Металлолом", "base_price": 500, "volatility": 0.15, "id": 1},
-    2: {"name": "💎 Сырая Нефть", "base_price": 1_500, "volatility": 0.25, "id": 2},
-    3: {"name": "💻 Чипы", "base_price": 4_000, "volatility": 0.35, "id": 3},
-}
-
-# --- Бизнесы (Сложная Производственная Цепочка) ---
-BUSINESSES: Dict[int, Dict] = {
-    1: {
-        "name": "🏭 Мини-Завод",
-        "cost": 500_000,
-        "max_level": 5,
-        "req_resource_id": 1, # Металлолом
-        "resource_per_cycle": 100, # 100 единиц сырья за цикл
-        "base_payout": 150_000,
-        "upgrade_cost_mult": 2.0, # Стоимость апгрейда увеличивается в 2 раза
-        "payout_mult": 1.5 # Доход увеличивается в 1.5 раза за уровень
-    },
-    2: {
-        "name": "🚀 Космический Порт",
-        "cost": 15_000_000,
-        "max_level": 10,
-        "req_resource_id": 2, # Сырая Нефть
-        "resource_per_cycle": 500,
-        "base_payout": 5_000_000,
-        "upgrade_cost_mult": 1.7,
-        "payout_mult": 1.3
-    },
-    3: {
-        "name": "⚛️ Квантовая Ферма",
-        "cost": 150_000_000,
-        "max_level": 15,
-        "req_resource_id": 3, # Чипы
-        "resource_per_cycle": 200,
-        "base_payout": 35_000_000,
-        "upgrade_cost_mult": 1.5,
-        "payout_mult": 1.25
-    },
-}
-
-# --- ЗАГЛУШКА ДЛЯ РАБОТЫ (JOBS) --- (Исправлено, отсутствовало в коде)
-JOBS = {
-    1: {'name': 'Младший Уборщик', 'salary': 5000},
-    2: {'name': 'Старший Уборщик', 'salary': 10000},
-    3: {'name': 'Менеджер', 'salary': 50000},
-}
-
-
-# =========================================================
-# === 2. БАЗА ДАННЫХ (ORM) ===
-# =========================================================
-
-Base = declarative_base()
-
-class User(Base):
-    __tablename__ = 'users'
-    id = Column(Integer, primary_key=True)
-    telegram_id = Column(BigInteger, unique=True, index=True)
-    username = Column(String(100), nullable=True)
-    first_name = Column(String(100), nullable=True)
-    
-    # Экономика
-    balance = Column(BigInteger, default=STARTING_BALANCE)
-    bank_balance = Column(BigInteger, default=0)
-    last_daily_bonus = Column(DateTime, default=datetime.min)
-    
-    # Карьера/Арест (Оставлены для разнообразия)
-    job_level = Column(Integer, default=1)
-    last_work_time = Column(DateTime, default=datetime.min)
-    arrest_expires = Column(DateTime, nullable=True)
-
-    # Статус
-    is_admin = Column(Boolean, default=False)
-    is_owner = Column(Boolean, default=False)
-    is_president = Column(Boolean, default=False)
-    is_banned = Column(Boolean, default=False)
-    
-    # Политика/Криминал
-    last_vote_time = Column(DateTime, nullable=True)
-    last_crime_time = Column(DateTime, default=datetime.min)
-
-    # Связи
-    loans = relationship("BankLoan", back_populates="user")
-    businesses = relationship("OwnedBusiness", back_populates="user")
-
-class BankLoan(Base):
-    __tablename__ = 'bank_loans'
-    id = Column(Integer, primary_key=True)
-    user_id = Column(BigInteger, ForeignKey('users.telegram_id'), index=True)
-    amount = Column(BigInteger)
-    interest_rate = Column(Float)
-    issue_date = Column(DateTime, default=datetime.now)
-    due_date = Column(DateTime)
-    paid = Column(Boolean, default=False)
-    
-    user = relationship("User", back_populates="loans", primaryjoin="User.telegram_id == BankLoan.user_id")
-
-class OwnedBusiness(Base):
-    __tablename__ = 'owned_businesses'
-    id = Column(Integer, primary_key=True)
-    user_id = Column(BigInteger, ForeignKey('users.telegram_id'), index=True)
-    business_id = Column(Integer)
-    count = Column(Integer, default=1)
-    upgrade_level = Column(Integer, default=1)
-    
-    # Сложный цикл производства
-    resource_stock = Column(Integer, default=0) # Запасы сырья
-    production_state = Column(String(20), default="IDLE") # IDLE, PRODUCING, READY
-    production_start_time = Column(DateTime, nullable=True)
-    last_collected = Column(DateTime, default=datetime.min)
-    
-    user = relationship("User", back_populates="businesses", primaryjoin="User.telegram_id == OwnedBusiness.user_id")
-
-class ElectionState(Base):
-    __tablename__ = 'election_state'
-    id = Column(Integer, primary_key=True)
-    phase = Column(String(20), default="IDLE")
-    
-    # Настройки, которые может менять Президент
-    tax_rate = Column(Float, default=0.10)     
-    loan_interest_rate = Column(Float, default=DEFAULT_LOAN_INTEREST_RATE)
-    
-    end_time = Column(DateTime, nullable=True)
-    last_election_time = Column(DateTime, default=datetime.min)
-
-class Candidate(Base):
-    __tablename__ = 'candidates'
-    id = Column(Integer, primary_key=True)
-    user_id = Column(BigInteger, unique=True)
-    votes = Column(Integer, default=0)
-
-class MarketItemPrice(Base):
-    __tablename__ = 'market_prices'
-    id = Column(Integer, primary_key=True)
-    item_id = Column(Integer, unique=True)
-    current_price = Column(BigInteger)
-
-class PresidentialBudget(Base):
-    __tablename__ = 'presidential_budget'
-    id = Column(Integer, primary_key=True)
-    budget = Column(BigInteger, default=0)
-
-class Chat(Base):
-    __tablename__ = 'chats'
-    id = Column(Integer, primary_key=True)
-    chat_id = Column(BigInteger, unique=True)
-
-# =========================================================
-# === 3. ИНИЦИАЛИЗАЦИЯ СЕРВИСОВ И УТИЛИТЫ ===
-# =========================================================
-
-# --- SQLAlchemy Setup ---
-try:
-    engine = create_engine(DB_PATH, pool_pre_ping=True, pool_size=10, max_overflow=20)
-    SessionLocal = sessionmaker(bind=engine)
-except Exception as e:
-    logging.error(f"❌ ОШИБКА НАСТРОЙКИ ENGINE: {e}")
-    sys.exit(1)
-
-def init_db():
-    """Инициализация базы данных, создание таблиц и первичных записей."""
-    try:
-        logging.info("Инициализация БД. Проверка таблиц...")
-        # Убедимся, что все отношения корректно работают (особенно ForeignKey с BigInteger)
-        Base.metadata.create_all(engine)
-        with SessionLocal() as s:
-            if not s.query(ElectionState).first():
-                s.add(ElectionState())
-            if not s.query(PresidentialBudget).first():
-                s.add(PresidentialBudget())
-            
-            # Инициализация цен на бирже
-            for item_id, item_info in MARKET_ITEMS.items():
-                if not s.query(MarketItemPrice).filter_by(item_id=item_id).first():
-                    s.add(MarketItemPrice(item_id=item_id, current_price=item_info['base_price']))
-            
-            # Назначение владельца
-            owner = s.query(User).filter_by(telegram_id=OWNER_ID).first()
-            if owner:
-                if not owner.is_owner:
-                    owner.is_owner = True
-                    owner.is_admin = True
-            
-            s.commit()
-            logging.info(f"✅ Владелец {OWNER_ID} подтвержден и права установлены. База готова.")
-        return True
-    except Exception as e:
-        logging.error(f"❌ Ошибка инициализации БД: {e}")
-        return False
-
-# --- Хелперы БД ---
-def get_user(telegram_id, username=None, first_name=None):
-    """Получает пользователя или создает нового, если не найден."""
-    with SessionLocal() as s:
-        u = s.query(User).filter_by(telegram_id=telegram_id).first()
-        if not u:
-            is_owner = (telegram_id == OWNER_ID)
-            u = User(telegram_id=telegram_id, username=username, first_name=first_name, is_owner=is_owner, is_admin=is_owner)
-            s.add(u)
-            s.commit()
-            s.refresh(u)
-        else:
-            # Обновление метаданных
-            if username and u.username != username: u.username = username
-            if first_name and u.first_name != first_name: u.first_name = first_name
-            if u.telegram_id == OWNER_ID and not u.is_owner:
-                 u.is_owner = True
-                 u.is_admin = True
-            s.commit()
-            s.refresh(u)
-        
-        # Возвращаем копию объекта (безопасность)
-        # SQLAlchemy возвращает прокси, поэтому можно возвращать u
-        return u 
-
-def format_cooldown(last_time: datetime, cooldown: timedelta) -> Optional[str]:
-    """Форматирует оставшееся время до конца кулдауна/таймера."""
-    remaining = last_time + cooldown - datetime.now()
-    if remaining.total_seconds() <= 0: return None
-    
-    hours = int(remaining.total_seconds() // 3600)
-    minutes = int((remaining.total_seconds() % 3600) // 60)
-    seconds = int(remaining.total_seconds() % 60)
-    
-    parts = []
-    if hours > 0: parts.append(f"{hours} ч.")
-    if minutes > 0: parts.append(f"{minutes} мин.")
-    if seconds > 0 or not parts: parts.append(f"{seconds} сек.")
-    
-    return " ".join(parts)
-
-def get_current_loan_interest(s: Session) -> float:
-    """Получает текущую ставку по кредитам, установленную Президентом."""
-    est = s.query(ElectionState).first()
-    return est.loan_interest_rate if est else DEFAULT_LOAN_INTEREST_RATE
-
-# =========================================================
-# === 4. AIOGRAM, FSM И КЛАВИАТУРЫ ===
-# =========================================================
-
-BOT_PROPS = DefaultBotProperties(parse_mode="Markdown")
-bot = Bot(token=BOT_TOKEN, default=BOT_PROPS)
+# Инициализация объектов
+bot = Bot(TOKEN, parse_mode=ParseMode.MARKDOWN)
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 scheduler = AsyncIOScheduler()
 
-# --- FSM States ---
-class GameStates(StatesGroup):
-    casino_bet = State()
-    admin_input = State()
+# Инициализация БД
+engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# =========================================================
+# === 2. КОНСТАНТЫ И ДАННЫЕ ИГРЫ ===
+# =========================================================
+
+# Кнопки
+BTN_BIZ_CENTER = "🏭 Бизнес-Центр"
+BTN_BANK = "🏦 Банк"
+BTN_MARKET = "📈 Биржа Ресурсов"
+BTN_CRIME = "🔫 Ограбить Банк"
+BTN_GOV_OFFICE = "🦅 Офис Президента"
+
+# Экономические константы
+DAILY_BONUS_AMOUNT = 10000
+CASINO_MIN_BET = 1000
+PRODUCTION_CYCLE_HOURS = 2 # Время производства одного цикла (в часах)
+LOAN_CYCLE_DAYS = 7 # Периодичность начисления штрафа за просрочку кредита (в днях)
+CRIME_FINE_MULTIPLIER = 1.5 # Множитель штрафа за провал ограбления
+CRIME_JAIL_TIME_MINUTES = 60 # Время тюрьмы в минутах
+TAX_MAX_RATE = 0.50 # Максимальный налог 50%
+
+# Ресурсы/Сырье (для биржи и производства)
+MARKET_ITEMS = {
+    1: {'name': "Древесина", 'base_price': 500, 'volatility': 0.15},
+    2: {'name': "Железо", 'base_price': 1200, 'volatility': 0.20},
+    3: {'name': "Нефть", 'base_price': 3000, 'volatility': 0.30},
+}
+
+# Бизнесы
+BUSINESSES = {
+    101: {
+        'name': "Лесопилка",
+        'cost': 15000,
+        'req_resource_id': 1, # Древесина
+        'base_payout': 1000, # Базовый доход (единиц продукции)
+        'max_level': 10,
+        'upgrade_cost_mult': 1.5, # Мультипликатор стоимости улучшения
+        'payout_mult': 1.25, # Мультипликатор дохода при улучшении
+        'payout_per_unit': 10, # Стоимость 1 ед. продукции (используется как базовая)
+    },
+    102: {
+        'name': "Шахта",
+        'cost': 50000,
+        'req_resource_id': 2, # Железо
+        'base_payout': 3500,
+        'max_level': 15,
+        'upgrade_cost_mult': 1.6,
+        'payout_mult': 1.3,
+        'payout_per_unit': 15,
+    },
+}
+
+
+# =========================================================
+# === 3. МОДЕЛИ БАЗЫ ДАННЫХ ===
+# =========================================================
+
+class User(Base):
+    """Модель пользователя"""
+    __tablename__ = "users"
+    telegram_id = Column(BigInteger, primary_key=True, index=True)
+    username = Column(String, default="Неизвестный")
+    balance = Column(BigInteger, default=10000)
+    bank_balance = Column(BigInteger, default=0)
+    job_level = Column(Integer, default=1)
+    last_daily_bonus = Column(DateTime, default=datetime(2023, 1, 1))
+    last_crime_time = Column(DateTime, default=datetime(2023, 1, 1))
+    arrest_expires = Column(DateTime, nullable=True) # Срок окончания тюрьмы
+    is_admin = Column(Boolean, default=False)
+    is_president = Column(Boolean, default=False)
+
+class OwnedBusiness(Base):
+    """Модель владения бизнесом"""
+    __tablename__ = "owned_businesses"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, index=True)
+    business_id = Column(Integer) # ID из словаря BUSINESSES
+    count = Column(Integer, default=1) # Количество одинаковых бизнесов
+    upgrade_level = Column(Integer, default=1)
     
+    # Состояние производства
+    production_state = Column(String, default="IDLE") # IDLE, PRODUCING, READY
+    production_start_time = Column(DateTime, nullable=True)
+    resource_units = Column(Integer, default=0) # Единицы сырья, вложенные в производство
+
+class BankLoan(Base):
+    """Модель кредитов"""
+    __tablename__ = "bank_loans"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(BigInteger, index=True)
+    amount = Column(BigInteger)
+    interest_rate = Column(Float)
+    issue_date = Column(DateTime, default=datetime.now)
+    due_date = Column(DateTime)
+    paid = Column(Boolean, default=False)
+
+class PresidentialBudget(Base):
+    """Модель Госбюджета"""
+    __tablename__ = "presidential_budget"
+    id = Column(Integer, primary_key=True)
+    budget = Column(BigInteger, default=0)
+
+class ElectionState(Base):
+    """Модель состояния выборов и экономики"""
+    __tablename__ = "election_state"
+    id = Column(Integer, primary_key=True)
+    current_president_id = Column(BigInteger, nullable=True)
+    tax_rate = Column(Float, default=0.10) # 10% налог на доход от бизнеса
+    loan_interest_rate = Column(Float, default=0.01) # 1% ежедневный процент по кредитам
+    last_election_time = Column(DateTime, default=datetime(2023, 1, 1))
+
+class MarketItemPrice(Base):
+    """Модель динамических цен на сырье"""
+    __tablename__ = "market_item_prices"
+    item_id = Column(Integer, primary_key=True, index=True) # ID из MARKET_ITEMS
+    current_price = Column(BigInteger)
+
+class Chat(Base):
+    """Модель для хранения ID чатов для рассылки"""
+    __tablename__ = "chats"
+    chat_id = Column(BigInteger, primary_key=True)
+
+
+def init_db():
+    """Инициализация БД и базовых записей"""
+    try:
+        Base.metadata.create_all(bind=engine)
+        
+        with SessionLocal() as s:
+            # 1. Инициализация Госбюджета
+            if not s.query(PresidentialBudget).first():
+                s.add(PresidentialBudget(budget=1000000))
+                s.commit()
+            
+            # 2. Инициализация Состояния Выборов/Экономики
+            if not s.query(ElectionState).first():
+                s.add(ElectionState())
+                s.commit()
+
+            # 3. Инициализация цен на рынке
+            for item_id, item_info in MARKET_ITEMS.items():
+                if not s.query(MarketItemPrice).filter_by(item_id=item_id).first():
+                    s.add(MarketItemPrice(item_id=item_id, current_price=item_info['base_price']))
+            s.commit()
+
+        logging.info("База данных успешно инициализирована.")
+        return True
+    except Exception as e:
+        logging.error(f"Ошибка инициализации БД: {e}")
+        return False
+
+# =========================================================
+# === 4. FSM СОСТОЯНИЯ ===
+# =========================================================
+
+class GameStates(StatesGroup):
+    """Состояния для конечного автомата (FSM)"""
+    casino_bet = State()
+    loan_amount = State()
+    loan_days = State()
     bank_deposit = State()
     bank_withdraw = State()
-    
-    loan_request = State() # Запрос суммы кредита
-    loan_pay = State() # Оплата кредита
-    
-    market_buy_select = State()
-    market_sell_select = State()
-    market_buy_amount = State() # Сумма покупки ресурса
-    
-    biz_buy = State()
-    biz_upgrade_select = State()
-    biz_resource_input = State() # Ввод сырья для бизнеса
-    
+    biz_res_input = State() # Ввод количества сырья для производства
     pres_tax_input = State()
     pres_loan_rate_input = State()
     pres_give_budget = State()
-
-# --- Клавиатуры ---
-def get_main_kb(is_admin=False, is_president=False):
-    """Основное меню."""
-    kb = [
-        [KeyboardButton(text="📒 Профиль"), KeyboardButton(text="💰 Банк"), KeyboardButton(text="💼 Активности")],
-        [KeyboardButton(text="🎰 Казино"), KeyboardButton(text=BTN_CRIME), KeyboardButton(text="🏆 Рейтинг")],
-        [KeyboardButton(text="🏛 Политика"), KeyboardButton(text=BTN_MARKET), KeyboardButton(text="💞 Помощь")]
-    ]
-    if is_president:
-        kb.insert(1, [KeyboardButton(text=BTN_GOV_OFFICE)])
-    if is_admin:
-        kb.append([KeyboardButton(text="🛡 Админка")])
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
-
-def get_activities_kb():
-    """Меню Активностей (Работа, Бизнес, Бонус)."""
-    kb = [
-        [KeyboardButton(text="💼 Устроиться"), KeyboardButton(text="📈 Бизнес-Центр")],
-        [KeyboardButton(text="🎁 Бонус")],
-        [KeyboardButton(text="🏠 Главное Меню")]
-    ]
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
-
-def get_bank_kb(has_debt: bool):
-    """Меню Банка."""
-    kb = [
-        [InlineKeyboardButton(text="📥 Депозит", callback_data="bank_deposit_start"),
-         InlineKeyboardButton(text="📤 Снять", callback_data="bank_withdraw_start")],
-        [InlineKeyboardButton(text=BTN_LOAN, callback_data="loan_request_start")]
-    ]
-    if has_debt:
-        kb.append([InlineKeyboardButton(text="💸 Погасить Кредит", callback_data="loan_pay_start")])
-    return InlineKeyboardMarkup(inline_keyboard=kb)
-
-def get_biz_management_kb(has_biz: bool):
-    """Меню Бизнес-Центра."""
-    kb = [
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="biz_stat")],
-        [InlineKeyboardButton(text="🛒 Купить новый бизнес", callback_data="biz_shop")],
-    ]
-    if has_biz:
-        kb.append([
-            InlineKeyboardButton(text="🏭 Запустить Производство", callback_data="biz_start_prod_select"),
-            InlineKeyboardButton(text="💵 Снять Готовый Доход", callback_data="biz_collect_all"),
-        ])
-        kb.append([InlineKeyboardButton(text="✅ Улучшить Бизнес", callback_data="biz_upgrade_start")])
-    return InlineKeyboardMarkup(inline_keyboard=kb)
-
-
-# =========================================================
-# === 5. ГЛАВНЫЙ ФУНКЦИОНАЛ ИГРЫ (ОСНОВНОЕ МЕНЮ) ===
-# =========================================================
-
-@router.message(Command("start"))
-async def cmd_start(message: types.Message):
-    u = get_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
     
+# =========================================================
+# === 5. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===
+# =========================================================
+
+def get_user(uid: int) -> User | None:
+    """Получает пользователя из БД или None, если не найден."""
     with SessionLocal() as s:
-        if not s.query(Chat).filter_by(chat_id=message.chat.id).first():
-            s.add(Chat(chat_id=message.chat.id))
-            s.commit()
-    
-    if u.is_banned: return await message.answer("🚫 Вы заблокированы.")
-    
-    await message.answer(
-        f"🌟 *Добро пожаловать в BongoCity*, {u.first_name}!\n"
-        f"Удачи в построении вашей империи!",
-        reply_markup=get_main_kb(u.is_admin, u.is_president)
-    )
+        return s.query(User).filter_by(telegram_id=uid).first()
 
-@router.message(F.text == "🏠 Главное Меню")
-async def cmd_back(message: types.Message):
-    u = get_user(message.from_user.id)
-    await message.answer("🏠 *Вы вернулись в Главное Меню.*", reply_markup=get_main_kb(u.is_admin, u.is_president))
+def update_user_profile(uid: int, username: str):
+    """Обновляет профиль пользователя при необходимости (например, в /start)"""
+    with SessionLocal() as s:
+        u = s.query(User).filter_by(telegram_id=uid).first()
+        if not u:
+            # Создаем нового пользователя с начальным балансом
+            election_state = s.query(ElectionState).first()
+            is_president = (election_state and election_state.current_president_id == uid)
+            u = User(telegram_id=uid, username=username, is_president=is_president)
+            s.add(u)
+        else:
+            u.username = username
+        s.commit()
+        # Возвращаем обновленный объект пользователя
+        # NOTE: Это функция должна возвращать объект, чтобы get_main_kb мог его использовать, 
+        # но в контексте aiogram 3.x, она обычно вызывается в начале хэндлеров.
+        return u
 
-@router.message(F.text == "📒 Профиль")
-@router.message(Command("profile"))
-async def cmd_profile(message: types.Message):
-    u = get_user(message.from_user.id)
+
+def get_main_kb(is_admin: bool = False, is_president: bool = False) -> ReplyKeyboardMarkup:
+    """Генерирует главное меню"""
+    kb = [
+        [KeyboardButton(text=BTN_BIZ_CENTER), KeyboardButton(text=BTN_BANK)],
+        [KeyboardButton(text=BTN_MARKET), KeyboardButton(text="🎰 Казино")],
+        [KeyboardButton(text="💼 Устроиться"), KeyboardButton(text="🎁 Бонус")],
+        [KeyboardButton(text="🏛 Политика"), KeyboardButton(text=BTN_CRIME)]
+    ]
     
+    if is_president:
+        kb.append([KeyboardButton(text=BTN_GOV_OFFICE)])
+    
+    if is_admin:
+        kb.append([KeyboardButton(text="/admin")])
+        
+    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+
+def format_cooldown(last_time: datetime, cooldown: timedelta) -> str | None:
+    """Форматирует оставшееся время до конца кулдауна."""
+    if not last_time: return None
+    
+    next_time = last_time + cooldown
+    remaining = next_time - datetime.now()
+
+    if remaining.total_seconds() > 0:
+        total_seconds = int(remaining.total_seconds())
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        
+        parts = []
+        if hours > 0: parts.append(f"{hours}ч")
+        if minutes > 0: parts.append(f"{minutes}м")
+        if seconds > 0 or not parts: parts.append(f"{seconds}с")
+            
+        return " ".join(parts)
+    return None
+
+def get_current_interest_rate() -> float:
+    """Получает текущую кредитную ставку из ElectionState."""
     with SessionLocal() as s:
         est = s.query(ElectionState).first()
-        tax_rate = est.tax_rate if est else 0.10
-        active_loans = s.query(BankLoan).filter_by(user_id=u.telegram_id, paid=False).count()
-        
-        # Определение статуса
-        status = "👨‍💼 Гражданин"
-        if u.is_owner: status = "👑 Владелец Вселенной"
-        elif u.is_president: status = "🦅 Президент"
-        elif u.is_admin: status = "🛡 Администратор"
-        
-        arrest_info = ""
-        if u.arrest_expires and u.arrest_expires > datetime.now():
-            left = format_cooldown(datetime.now(), u.arrest_expires - datetime.now())
-            arrest_info = f"\n🚨 **В ТЮРЬМЕ**: осталось {left}"
+        return est.loan_interest_rate if est else 0.01
 
-        # Защита от отсутствия уровня работы
-        job_name = JOBS.get(u.job_level, {'name': 'Безработный'}).get('name')
-
-        info = (
-            f"👤 *Профиль: {u.first_name}*\n"
-            f"ID: `{u.telegram_id}` | **{status}**\n\n"
-            f"--- 💵 Финансы ---\n"
-            f"💰 Наличные: *{u.balance:,} $*\n"
-            f"🏦 Банковский Счет: *{u.bank_balance:,} $*\n"
-            f"💸 Активных Кредитов: **{active_loans}**\n"
-            f"🏛 Гос. Налог: {int(tax_rate*100)}%\n"
-            f"--- ⚙️ Статус ---\n"
-            f"🛠 Текущая Работа: {job_name}\n" # ИСПРАВЛЕНО
-            f"{arrest_info}"
-        )
-            
-    await message.answer(info, reply_markup=get_main_kb(u.is_admin, u.is_president))
-
-# --- Рейтинг ---
-@router.message(F.text == "🏆 Рейтинг")
-async def cmd_top(message: types.Message):
+def get_current_tax_rate() -> float:
+    """Получает текущую ставку налога из ElectionState."""
     with SessionLocal() as s:
-        # Сложный рейтинг: Наличные + Банк - Кредиты
-        subquery = s.query(BankLoan.user_id, func.sum(BankLoan.amount).label('total_debt')).filter_by(paid=False).group_by(BankLoan.user_id).subquery()
-        
-        users = s.query(
-            User,
-            (User.balance + User.bank_balance - coalesce(subquery.c.total_debt, 0)).label('net_wealth')
-        ).outerjoin(subquery, User.telegram_id == subquery.c.user_id) \
-        .order_by(text('net_wealth DESC')) \
-        .limit(10).all()
-    
-    text = "🏆 **ТОП-10 Богатейших Граждан BongoCity** (Чистый Капитал)\n"
-    for i, (u, net_wealth) in enumerate(users):
-        name = u.username or u.first_name
-        is_pres = "🦅" if u.is_president else ""
-        text += f"{i+1}. {is_pres} {name}: *{net_wealth:,.0f} $*\n"
-        
-    await message.answer(text)
+        est = s.query(ElectionState).first()
+        return est.tax_rate if est else 0.10
 
-# --- Помощь ---
-@router.message(F.text == "💞 Помощь")
-async def cmd_help(message: types.Message):
-    u = get_user(message.from_user.id)
+# =========================================================
+# === 6. БАЗОВЫЕ КОМАНДЫ (СТАРТ, ПРОФИЛЬ) ===
+# =========================================================
+
+@router.message(CommandStart())
+async def cmd_start(message: types.Message):
+    """Обработчик команды /start"""
+    username = message.from_user.username or message.from_user.full_name
+    u = update_user_profile(message.from_user.id, username)
+    
+    # Добавление чата в БД для рассылки
+    if message.chat.type in ('group', 'supergroup'):
+        with SessionLocal() as s:
+            if not s.query(Chat).filter_by(chat_id=message.chat.id).first():
+                s.add(Chat(chat_id=message.chat.id))
+                s.commit()
+
     await message.answer(
-        "✨ *Помощь и Информация*\n\n"
-        "**Система Бизнеса:** Для получения дохода ваши бизнесы теперь требуют *Сырья*. Купите его на Бирже, запустите производство, и через некоторое время соберите готовую продукцию.\n\n"
-        "**Банк:** Вы можете брать кредиты с ежедневным начислением процентов. Неуплата приводит к штрафам!\n\n"
-        "**Политика:** Президент управляет Госбюджетом и устанавливает Налоги и Кредитную Ставку.",
+        f"👋 Добро пожаловать, *{username}*, в BongoCity – симулятор жизни и бизнеса!\n"
+        f"Ваш начальный баланс: {u.balance:,}$.\n"
+        f"Используйте кнопки для взаимодействия с городом.",
+        reply_markup=get_main_kb(u.is_admin, u.is_president)
+    )
+
+@router.message(Command("profile"))
+async def cmd_profile(message: types.Message):
+    """Обработчик команды /profile"""
+    u = get_user(message.from_user.id)
+    if not u:
+        return await message.answer("Пожалуйста, начните с команды /start.")
+    
+    # Расчет чистого капитала (Net Worth)
+    net_worth = u.balance + u.bank_balance
+    
+    # Инфо о тюрьме
+    jail_status = "Свободен"
+    if u.arrest_expires and u.arrest_expires > datetime.now():
+        remaining = u.arrest_expires - datetime.now()
+        jail_status = f"В тюрьме (Осталось: {format_cooldown(datetime.now(), remaining)})"
+
+    # Инфо о кредитах
+    with SessionLocal() as s:
+        loans = s.query(BankLoan).filter_by(user_id=u.telegram_id, paid=False).all()
+        loan_info = f"❌ Нет активных кредитов."
+        if loans:
+            total_debt = sum(l.amount for l in loans)
+            loan_info = f"✅ Всего долг: {total_debt:,}$"
+
+    # Инфо о бизнесе
+    with SessionLocal() as s:
+        biz_count = s.query(OwnedBusiness).filter_by(user_id=u.telegram_id).count()
+        biz_status = f"✅ {biz_count} шт."
+
+    # Инфо о политике
+    pres_status = "Нет"
+    if u.is_president:
+        pres_status = "ДА (Президент)"
+
+    await message.answer(
+        f"👤 **Профиль {u.username}**\n\n"
+        f"💰 **Наличные**: {u.balance:,}$ \n"
+        f"🏦 **Банк**: {u.bank_balance:,}$ \n"
+        f"📊 **Чистый капитал**: {net_worth:,}$ \n\n"
+        f"🏭 **Бизнесы**: {biz_status}\n"
+        f"💼 **Уровень работы**: {u.job_level}\n"
+        f"🚨 **Статус**: {jail_status}\n\n"
+        f"💵 **Кредиты**: {loan_info}\n"
+        f"🏛 **Президент**: {pres_status}",
         reply_markup=get_main_kb(u.is_admin, u.is_president)
     )
 
 # =========================================================
-# === 6. БАНК И КРЕДИТНАЯ СИСТЕМА (СЛОЖНО) ===
+# === 7. БАНК (ДЕПОЗИТ, СНЯТИЕ, КРЕДИТЫ) ===
 # =========================================================
 
-@router.message(F.text == "💰 Банк")
+@router.message(F.text == BTN_BANK)
 async def cmd_bank(message: types.Message):
+    """Главное меню банка"""
     u = get_user(message.from_user.id)
-    with SessionLocal() as s:
-        has_debt = s.query(BankLoan).filter_by(user_id=u.telegram_id, paid=False).first() is not None
-        interest_rate = get_current_loan_interest(s)
+    rate = get_current_interest_rate()
     
-    fee_text = f"Комиссия за операцию: *{int(BANK_FEE_RATE*100)}%*.\n"
-    loan_text = f"Ставка по кредитам (24ч): *{int(interest_rate*100)}%*."
+    with SessionLocal() as s:
+        loans = s.query(BankLoan).filter_by(user_id=u.telegram_id, paid=False).all()
+        total_debt = sum(l.amount for l in loans)
+        loan_count = len(loans)
+        
+        loan_info = ""
+        if loan_count > 0:
+            loan_info = f" (Долг: {total_debt:,}$)"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📥 Депозит", callback_data="bank_deposit_start")],
+        [InlineKeyboardButton(text="📤 Снять", callback_data="bank_withdraw_start")],
+        [InlineKeyboardButton(text=f"💸 Кредит ({int(rate*100)}% в день)", callback_data="loan_start")],
+        [InlineKeyboardButton(text=f"💳 Погасить Кредит ({loan_count})", callback_data="loan_repay_menu")],
+    ])
     
     await message.answer(
         f"🏦 **Банк BongoCity**\n"
-        f"Ваш счет: *{u.bank_balance:,} $*\n"
-        f"{fee_text}{loan_text}",
-        reply_markup=get_bank_kb(has_debt)
+        f"Ваш баланс: *{u.bank_balance:,} $*\n"
+        f"Активные кредиты: *{loan_count}*{loan_info}",
+        reply_markup=kb
     )
 
-# --- Депозит/Снятие (FSM) ---
+# --- Логика Депозита ---
 @router.callback_query(F.data == "bank_deposit_start")
 async def bank_deposit_start(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
+    u = get_user(call.from_user.id)
     await state.set_state(GameStates.bank_deposit)
-    await call.message.edit_text("📥 Введите сумму депозита (наличные -> банк):")
+    await call.message.answer(
+        f"📥 **Внести Средства**\n"
+        f"Наличные: {u.balance:,}$\n"
+        f"Введите сумму для депозита (0 для отмены):"
+    )
 
 @router.message(GameStates.bank_deposit)
 async def bank_deposit_finish(message: types.Message, state: FSMContext):
+    await state.clear()
     uid = message.from_user.id
     try: amount = int(message.text)
-    except:
-        await state.clear()
-        return await message.answer("❌ Введите число.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
+    except: return await message.answer("❌ Введите число.")
+    
+    if amount == 0: return await message.answer("Отменено.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
+    if amount <= 0: return await message.answer("❌ Сумма должна быть положительной.")
 
-    with SessionLocal() as s:
-        u = s.query(User).filter_by(telegram_id=uid).with_for_update().first()
-        
-        if amount <= 0:
-             await state.clear()
-             return await message.answer("❌ Сумма должна быть положительной.", reply_markup=get_main_kb(u.is_admin, u.is_president))
-        
-        fee = int(amount * BANK_FEE_RATE)
-        net_amount = amount - fee
-        
-        if u.balance < amount:
-             await state.clear()
-             return await message.answer(f"❌ Не хватает наличных. У вас: {u.balance:,}$", reply_markup=get_main_kb(u.is_admin, u.is_president))
+    try:
+        with SessionLocal() as s:
+            u = s.query(User).filter_by(telegram_id=uid).with_for_update().first()
+            if u.balance < amount:
+                return await message.answer(f"❌ Не хватает наличных. У вас: {u.balance:,}$")
+            
+            u.balance -= amount
+            u.bank_balance += amount
+            s.commit()
+            
+            await message.answer(
+                f"✅ **Депозит Успешен!**\n"
+                f"Внесено: *+{amount:,} $*\n"
+                f"Банковский баланс: {u.bank_balance:,}$",
+                reply_markup=get_main_kb(u.is_admin, u.is_president)
+            )
+    except SQLAlchemyError:
+        await message.answer("❌ Ошибка БД.")
 
-        u.balance -= amount
-        u.bank_balance += net_amount
-        s.commit()
-        
-        await state.clear()
-        await message.answer(
-            f"✅ **Депозит Успешен!**\n"
-            f"Сумма: +{net_amount:,}$ (Счет)\n"
-            f"Комиссия: -{fee:,}$ (Налог)\n"
-            f"Остаток: {u.balance:,}$ (Наличные)",
-            reply_markup=get_main_kb(u.is_admin, u.is_president)
-        )
-
+# --- Логика Снятия ---
 @router.callback_query(F.data == "bank_withdraw_start")
 async def bank_withdraw_start(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
+    u = get_user(call.from_user.id)
     await state.set_state(GameStates.bank_withdraw)
-    await call.message.edit_text("📤 Введите сумму для снятия (банк -> наличные):")
+    await call.message.answer(
+        f"📤 **Снять Средства**\n"
+        f"На балансе: {u.bank_balance:,}$\n"
+        f"Введите сумму для снятия (0 для отмены):"
+    )
 
 @router.message(GameStates.bank_withdraw)
 async def bank_withdraw_finish(message: types.Message, state: FSMContext):
+    await state.clear()
     uid = message.from_user.id
+    try: amount = int(message.text)
+    except: return await message.answer("❌ Введите число.")
+    
+    if amount == 0: return await message.answer("Отменено.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
+    if amount <= 0: return await message.answer("❌ Сумма должна быть положительной.")
+
+    try:
+        with SessionLocal() as s:
+            u = s.query(User).filter_by(telegram_id=uid).with_for_update().first()
+            if u.bank_balance < amount:
+                return await message.answer(f"❌ Не хватает на банковском счете. У вас: {u.bank_balance:,}$")
+            
+            u.bank_balance -= amount
+            u.balance += amount
+            s.commit()
+            
+            await message.answer(
+                f"✅ **Снятие Успешно!**\n"
+                f"Снято: *+{amount:,} $*\n"
+                f"Наличные: {u.balance:,}$",
+                reply_markup=get_main_kb(u.is_admin, u.is_president)
+            )
+    except SQLAlchemyError:
+        await message.answer("❌ Ошибка БД.")
+
+# --- Логика Кредитов ---
+@router.callback_query(F.data == "loan_start")
+async def loan_start(call: types.CallbackQuery, state: FSMContext):
+    await call.answer()
+    
+    # 1. Проверка на максимальное количество активных кредитов (например, 3)
+    with SessionLocal() as s:
+        active_loans = s.query(BankLoan).filter_by(user_id=call.from_user.id, paid=False).count()
+        if active_loans >= 3:
+            return await call.message.answer("❌ Вы не можете взять более 3 активных кредитов одновременно.")
+            
+    await state.set_state(GameStates.loan_amount)
+    await call.message.answer("💸 **Запрос Кредита**\nВведите желаемую сумму кредита:")
+
+@router.message(GameStates.loan_amount)
+async def loan_amount_input(message: types.Message, state: FSMContext):
     try: amount = int(message.text)
     except:
         await state.clear()
-        return await message.answer("❌ Введите число.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
-
-    with SessionLocal() as s:
-        u = s.query(User).filter_by(telegram_id=uid).with_for_update().first()
+        return await message.answer("❌ Введите корректную сумму.", reply_markup=get_main_kb(get_user(message.from_user.id).is_admin, get_user(message.from_user.id).is_president))
         
-        if amount <= 0:
-            await state.clear()
-            return await message.answer("❌ Сумма должна быть положительной.", reply_markup=get_main_kb(u.is_admin, u.is_president))
-        
-        fee = int(amount * BANK_FEE_RATE)
-        net_amount = amount - fee
-        
-        if u.bank_balance < amount:
-            await state.clear()
-            return await message.answer(f"❌ Не хватает на счету. На счету: {u.bank_balance:,}$", reply_markup=get_main_kb(u.is_admin, u.is_president))
-
-        u.bank_balance -= amount
-        u.balance += net_amount
-        s.commit()
-        
+    if amount <= 10000:
         await state.clear()
-        await message.answer(
-            f"✅ **Снятие Успешно!**\n"
-            f"Сумма: +{net_amount:,}$ (Наличные)\n"
-            f"Комиссия: -{fee:,}$ (Налог)\n"
-            f"Остаток: {u.bank_balance:,}$ (Счет)",
-            reply_markup=get_main_kb(u.is_admin, u.is_president)
-        )
+        return await message.answer("❌ Минимальная сумма кредита: 10,000 $.", reply_markup=get_main_kb(get_user(message.from_user.id).is_admin, get_user(message.from_user.id).is_president))
 
+    await state.update_data(amount=amount)
+    await state.set_state(GameStates.loan_days)
+    await message.answer("Введите срок кредита в днях (от 7 до 30):")
 
-@router.callback_query(F.data == "loan_request_start")
-async def loan_request_start(call: types.CallbackQuery, state: FSMContext):
-    await call.answer()
-    uid = call.from_user.id
-    
-    with SessionLocal() as s:
-        u = s.query(User).filter_by(telegram_id=uid).first()
-        active_loans = s.query(BankLoan).filter_by(user_id=uid, paid=False).count()
-        max_loan_amount = u.balance * MAX_LOAN_AMOUNT_MULTIPLIER
-        rate = get_current_loan_interest(s)
-        
-        if active_loans >= 3:
-             return await call.message.answer("❌ У вас слишком много активных кредитов (Максимум 3).")
-        
-        await state.set_state(GameStates.loan_request)
-        await state.update_data(rate=rate, max_loan=max_loan_amount)
-        
-        await call.message.edit_text(
-            f"🏦 **Запрос Кредита**\n"
-            f"Текущая ставка: {int(rate*100)}% (за {LOAN_CYCLE_DAYS} день).\n"
-            f"Максимальная сумма: {max_loan_amount:,}$ (10x от наличных).\n"
-            f"Введите желаемую сумму кредита:"
-        )
-
-
-@router.message(GameStates.loan_request)
-async def loan_request_finish(message: types.Message, state: FSMContext):
+@router.message(GameStates.loan_days)
+async def loan_days_input(message: types.Message, state: FSMContext):
     uid = message.from_user.id
-    data = await state.get_data()
-    await state.clear()
+    try: days = int(message.text)
+    except:
+        await state.clear()
+        return await message.answer("❌ Введите корректное количество дней.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
     
-    try: amount = int(message.text)
-    except: return await message.answer("❌ Введите число.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
+    if not (7 <= days <= 30):
+        await state.clear()
+        return await message.answer("❌ Срок кредита должен быть от 7 до 30 дней.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
+    
+    data = await state.get_data()
+    amount = data['amount']
+    await state.clear()
 
-    with SessionLocal() as s:
-        u = s.query(User).filter_by(telegram_id=uid).with_for_update().first()
-        max_loan = data.get('max_loan', 0) # Используем сохраненный максимум
-        
-        if amount <= 1000 or amount > max_loan:
-             return await message.answer(f"❌ Сумма должна быть между 1,000$ и {max_loan:,}$.", reply_markup=get_main_kb(u.is_admin, u.is_president))
-        
-        rate = data.get('rate', DEFAULT_LOAN_INTEREST_RATE)
-        due_date = datetime.now() + timedelta(days=LOAN_CYCLE_DAYS)
-        
-        # Выдаем деньги на банковский счет
-        u.bank_balance += amount 
-        
-        s.add(BankLoan(
-            user_id=uid,
-            amount=amount,
-            interest_rate=rate,
-            due_date=due_date
-        ))
-        s.commit()
-        
-        await message.answer(
-            f"✅ **Кредит Одобрен!**\n"
-            f"Сумма: +{amount:,}$ (на счет)\n"
-            f"Срок погашения: {due_date.strftime('%d.%m.%Y')}\n"
-            f"Процент: {int(rate*100)}%",
-            reply_markup=get_main_kb(u.is_admin, u.is_president)
-        )
+    rate = get_current_interest_rate()
+    due_date = datetime.now() + timedelta(days=days)
+    
+    # Расчет полной суммы к возврату (процент ежедневный, но для инфо посчитаем общую)
+    total_interest = int(amount * rate * days)
+    total_repay = amount + total_interest
+    
+    try:
+        with SessionLocal() as s:
+            u = s.query(User).filter_by(telegram_id=uid).with_for_update().first()
+            
+            # 1. Выдача денег
+            u.balance += amount
+            
+            # 2. Создание записи о кредите
+            loan = BankLoan(
+                user_id=uid,
+                amount=amount,
+                interest_rate=rate,
+                due_date=due_date
+            )
+            s.add(loan)
+            s.commit()
+            
+            await message.answer(
+                f"✅ **Кредит Одобрен!**\n"
+                f"Получено: *+{amount:,} $*\n"
+                f"Ставка: {int(rate*100)}% в день\n"
+                f"Срок: {days} дней (до {due_date.strftime('%d.%m.%Y')})\n"
+                f"~Общая сумма к возврату: {total_repay:,} $~",
+                reply_markup=get_main_kb(u.is_admin, u.is_president)
+            )
+            
+    except SQLAlchemyError:
+        await message.answer("❌ Ошибка БД при оформлении кредита.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
 
-@router.callback_query(F.data == "loan_pay_start")
-async def loan_pay_start(call: types.CallbackQuery, state: FSMContext):
+# --- Меню Погашения Кредитов ---
+@router.callback_query(F.data == "loan_repay_menu")
+async def loan_repay_menu(call: types.CallbackQuery):
     await call.answer()
     uid = call.from_user.id
     
     with SessionLocal() as s:
         loans = s.query(BankLoan).filter_by(user_id=uid, paid=False).all()
-        if not loans:
-             return await call.message.answer("Нет активных кредитов для погашения.")
         
-        text = "Выберите кредит для погашения:\n"
+        if not loans:
+            return await call.message.answer("❌ У вас нет активных кредитов для погашения.")
+            
         kb = InlineKeyboardMarkup(inline_keyboard=[])
         
         for loan in loans:
-            # Начисление текущего процента (просто для отображения)
+            # Расчет текущего долга: Сумма + Начисленные проценты до сегодня
             days_passed = (datetime.now() - loan.issue_date).days
-            # Минимум 1 цикл для начисления процентов
-            cycles = max(1, days_passed // LOAN_CYCLE_DAYS)
-
-            # Проценты начисляются только за прошедшие полные циклы.
-            total_interest = loan.amount * loan.interest_rate * cycles
-            total_payback = loan.amount + total_interest
+            interest_accrued = int(loan.amount * loan.interest_rate * days_passed)
+            total_due = loan.amount + interest_accrued
             
-            text += f"ID {loan.id}. Сумма: {loan.amount:,}$, %: {int(loan.interest_rate*100)}%, К возврату: {total_payback:,.0f}$\n"
-            kb.inline_keyboard.append([InlineKeyboardButton(text=f"Погасить ID {loan.id} ({total_payback:,.0f}$)", callback_data=f"loan_pay_do_{loan.id}")])
+            btn_text = (
+                f"💳 Кредит #{loan.id} | Долг: {total_due:,}$ "
+                f"(Начало: {loan.amount:,}$)"
+            )
+            kb.inline_keyboard.append([InlineKeyboardButton(
+                text=btn_text,
+                callback_data=f"loan_repay_do_{loan.id}_{total_due}"
+            )])
             
-    await call.message.answer(text, reply_markup=kb)
+        await call.message.answer("💳 **Погашение Кредитов**\nВыберите кредит для полного погашения:", reply_markup=kb)
 
-@router.callback_query(F.data.startswith("loan_pay_do_"))
-async def loan_pay_do(call: types.CallbackQuery):
+@router.callback_query(F.data.startswith("loan_repay_do_"))
+async def loan_repay_do(call: types.CallbackQuery):
     await call.answer()
-    loan_id = int(call.data.split('_')[3])
     uid = call.from_user.id
-    
+    try:
+        _, _, loan_id_str, total_due_str = call.data.split('_')
+        loan_id = int(loan_id_str)
+        total_due = int(total_due_str)
+    except ValueError:
+        return await call.message.answer("❌ Ошибка обработки данных.")
+
     try:
         with SessionLocal() as s:
             u = s.query(User).filter_by(telegram_id=uid).with_for_update().first()
             loan = s.query(BankLoan).filter_by(id=loan_id, user_id=uid, paid=False).with_for_update().first()
             
             if not loan:
-                 return await call.message.answer("❌ Кредит не найден.")
-
-            # Расчет суммы к погашению (с процентом)
-            days_passed = (datetime.now() - loan.issue_date).days
-            # Минимум 1 цикл для начисления процентов
-            cycles = max(1, days_passed // LOAN_CYCLE_DAYS)
+                return await call.message.answer("❌ Кредит не найден или уже погашен.")
+            if u.balance < total_due:
+                return await call.message.answer(f"❌ Не хватает наличных. Требуется: {total_due:,}$")
             
-            # Проценты начисляются только за прошедшие полные циклы.
-            total_interest = loan.amount * loan.interest_rate * cycles
-            total_payback = loan.amount + total_interest
-
-            if u.bank_balance < total_payback:
-                 return await call.message.answer(f"❌ На счету недостаточно средств. Необходимо: {total_payback:,.0f}$ (на счету: {u.bank_balance:,}$) ")
+            # 1. Списание средств
+            u.balance -= total_due
             
-            # Погашение
-            u.bank_balance -= total_payback
+            # 2. Пометка как оплаченный
             loan.paid = True
             
-            # Налоговое отчисление (Госбюджет)
+            # 3. Добавление платежа в Госбюджет (как доход банка)
             budget = s.query(PresidentialBudget).with_for_update().first()
-            gov_share = int(total_interest * 0.20) # 20% от процентов идет в госбюджет
-            budget.budget += gov_share
-            
+            budget.budget += total_due # Вся сумма идет в бюджет (симуляция госбанка)
+
             s.commit()
             
             await call.message.answer(
-                f"✅ **Кредит ID {loan_id} Погашен!**\n"
-                f"Сумма погашения: {total_payback:,.0f}$ (включая {total_interest:,.0f}$ процентов)\n"
-                f"Остаток на счете: {u.bank_balance:,}$"
+                f"🎉 **Кредит Погашен!**\n"
+                f"Кредит #{loan.id} успешно закрыт. Списано: *-{total_due:,} $*\n"
+                f"Текущие наличные: {u.balance:,}$"
             )
-
-    except SQLAlchemyError as e:
-        logging.error(f"Loan Pay DB Error: {e}")
+            
+    except SQLAlchemyError:
         await call.message.answer("❌ Ошибка БД при погашении кредита.")
 
-
 # =========================================================
-# === 7. СЛОЖНАЯ СИСТЕМА БИЗНЕСА И ПРОИЗВОДСТВА ===
+# === 8. БИЗНЕС-ЦЕНТР (ПОКУПКА, УЛУЧШЕНИЕ, ПРОИЗВОДСТВО) ===
 # =========================================================
 
-@router.message(F.text == "💼 Активности")
-async def cmd_activities(message: types.Message):
-    await message.answer("💼 *Меню Активностей BongoCity*\n"
-                         "Выберите, чем займетесь сегодня!",
-                         reply_markup=get_activities_kb())
-
-# --- Бизнес-Центр ---
-@router.message(F.text == "📈 Бизнес-Центр")
-async def cmd_biz(message: types.Message):
+@router.message(F.text == BTN_BIZ_CENTER)
+async def cmd_biz_center(message: types.Message):
+    """Меню Бизнес-Центра"""
     u = get_user(message.from_user.id)
-    with SessionLocal() as s:
-        has_biz = s.query(OwnedBusiness).filter_by(user_id=u.telegram_id).first()
-    await message.answer("🏢 **Бизнес-Центр BongoCity**\n"
-                         "Управляйте своими производственными активами!", reply_markup=get_biz_management_kb(has_biz is not None))
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🛒 Купить Новый Бизнес", callback_data="biz_shop")],
+        [InlineKeyboardButton(text="🏭 Запустить Производство", callback_data="biz_production_start")],
+        [InlineKeyboardButton(text="📦 Собрать Продукцию", callback_data="biz_collect")],
+        [InlineKeyboardButton(text="✨ Улучшить Бизнес", callback_data="biz_upgrade_start")],
+    ])
+    
+    await message.answer(
+        f"🏭 **Бизнес-Центр BongoCity**\n"
+        f"Управляйте своими активами и производством.",
+        reply_markup=kb
+    )
 
-@router.callback_query(F.data == "biz_stat")
-async def biz_stat(call: types.CallbackQuery):
+# --- Запуск Производства ---
+@router.callback_query(F.data == "biz_production_start")
+async def biz_production_start(call: types.CallbackQuery):
     await call.answer()
     uid = call.from_user.id
     
     with SessionLocal() as s:
-        bizs = s.query(OwnedBusiness).filter_by(user_id=uid).all()
-        est = s.query(ElectionState).first()
-        tax_rate = est.tax_rate if est else 0.10
+        # Бизнесы, которые могут начать производство (статус IDLE)
+        bizs_idle = s.query(OwnedBusiness).filter_by(user_id=uid, production_state="IDLE").all()
         
-        if not bizs:
-            return await call.message.answer("У вас пока нет бизнесов.")
-        
-        # ИСПРАВЛЕН синтаксис f-строки
-        info = f"📊 **Ваши Производственные Активы** (Налог: {int(tax_rate*100)}%)\n"
-        
-        for b in bizs:
+        if not bizs_idle:
+            return await call.message.answer("❌ Нет бизнесов в режиме *Ожидания* для запуска производства.")
+            
+        # Группируем по типу бизнеса, чтобы показать один раз
+        biz_options = {}
+        for b in bizs_idle:
             biz_info = BUSINESSES.get(b.business_id)
-            if not biz_info: continue
-            
-            # Расчет дохода (базовый доход * мультипликатор уровня)
-            current_payout = int(biz_info['base_payout'] * (biz_info['payout_mult'] ** (b.upgrade_level - 1)))
-            resource_info = MARKET_ITEMS.get(biz_info['req_resource_id'])
-            
-            status_emoji = "🛑"
-            production_status = ""
-            if b.production_state == "IDLE":
-                status_emoji = "💤"
-                production_status = f"Требуется {biz_info['resource_per_cycle'] * b.count} x {resource_info['name']}"
-            elif b.production_state == "PRODUCING" and b.production_start_time:
-                status_emoji = "⏳"
-                # Используем timedelta в format_cooldown
-                remaining = format_cooldown(b.production_start_time, timedelta(hours=PRODUCTION_CYCLE_HOURS))
-                production_status = f"Производство. Осталось: {remaining}"
-            elif b.production_state == "READY":
-                status_emoji = "✅"
-                production_status = f"Готово к сбору! (x{b.count} ед.)"
-            
-            info += (
-                f"\n--- {biz_info['name']} (x{b.count}) ---\n"
-                f"🌟 Уровень: {b.upgrade_level}\n"
-                f"💰 Выход: {current_payout:,} $ за 1 ед. (Общий потенциал: {current_payout * b.count:,} $)\n"
-                f"⚙️ Сырье в запасе: {b.resource_stock} ед.\n"
-                f"{status_emoji} Статус: *{production_status}*"
-            )
-            
-        await call.message.answer(info, reply_markup=get_biz_management_kb(True))
+            if b.business_id not in biz_options:
+                biz_options[b.business_id] = {
+                    'name': biz_info['name'],
+                    'count': 0,
+                    'req_resource_id': biz_info['req_resource_id']
+                }
+            biz_options[b.business_id]['count'] += b.count
 
-# --- Запуск Производства (FSM-покупка сырья) ---
-@router.callback_query(F.data == "biz_start_prod_select")
-async def biz_start_prod_select(call: types.CallbackQuery):
-    await call.answer()
-    uid = call.from_user.id
-
-    with SessionLocal() as s:
-        bizs = s.query(OwnedBusiness).filter_by(user_id=uid).all()
         kb = InlineKeyboardMarkup(inline_keyboard=[])
-        
-        for b in bizs:
-            biz_info = BUSINESSES.get(b.business_id)
-            if not biz_info: continue
+        for bid, info in biz_options.items():
+            res_name = MARKET_ITEMS[info['req_resource_id']]['name']
+            kb.inline_keyboard.append([InlineKeyboardButton(
+                text=f"🏭 {info['name']} ({info['count']} шт.) | Требует {res_name}",
+                callback_data=f"biz_res_select_{bid}"
+            )])
             
-            res_id = biz_info['req_resource_id']
-            res_name = MARKET_ITEMS[res_id]['name']
-            
-            # Проверяем, сколько сырья нужно для одного полного цикла (для всех объектов этого типа)
-            required_res = biz_info['resource_per_cycle'] * b.count
-            
-            status = "➕"
-            if b.production_state == "PRODUCING":
-                 status = "⏳"
-            elif b.production_state == "READY":
-                 status = "✅"
-            
-            kb.inline_keyboard.append([
-                InlineKeyboardButton(
-                    text=f"{status} {biz_info['name']} (x{b.count}) | Запас: {b.resource_stock} | Нужно: {required_res} x {res_name}",
-                    callback_data=f"biz_res_input_{b.id}"
-                )
-            ])
-            
-    await call.message.answer("Запуск производства: Выберите бизнес, для которого хотите купить сырье:", reply_markup=kb)
+        await call.message.answer("🏭 **Запуск Производства**\nВыберите тип бизнеса для запуска:", reply_markup=kb)
 
-@router.callback_query(F.data.startswith("biz_res_input_"))
-async def biz_res_input_start(call: types.CallbackQuery, state: FSMContext):
+@router.callback_query(F.data.startswith("biz_res_select_"))
+async def biz_res_select(call: types.CallbackQuery, state: FSMContext):
     await call.answer()
-    biz_db_id = int(call.data.split('_')[3])
+    bid = int(call.data.split("_")[3])
+    biz_info = BUSINESSES.get(bid)
+    res_id = biz_info['req_resource_id']
+    res_name = MARKET_ITEMS[res_id]['name']
     
+    # Получаем текущую цену сырья
     with SessionLocal() as s:
-        b = s.query(OwnedBusiness).filter_by(id=biz_db_id, user_id=call.from_user.id).first()
-        if not b: return await call.message.answer("❌ Бизнес не найден.")
+        price_data = s.query(MarketItemPrice).filter_by(item_id=res_id).first()
+        current_price = price_data.current_price if price_data else MARKET_ITEMS[res_id]['base_price']
         
-        biz_info = BUSINESSES.get(b.business_id)
-        res_info = MARKET_ITEMS.get(biz_info['req_resource_id'])
-        # ИСПРАВЛЕНА потенциальная ошибка, если цена не найдена
-        market_price_obj = s.query(MarketItemPrice).filter_by(item_id=res_info['id']).first()
-        current_price = market_price_obj.current_price if market_price_obj else res_info['base_price']
-        
-        # Кол-во сырья для 1 полного цикла
-        required_res = biz_info['resource_per_cycle'] * b.count
-        
-        await state.set_state(GameStates.biz_resource_input)
-        await state.update_data(biz_db_id=biz_db_id, res_id=res_info['id'], price=current_price)
+    await state.update_data(business_id=bid, resource_id=res_id, price=current_price)
+    await state.set_state(GameStates.biz_res_input)
 
-        await call.message.answer(
-            f"🛒 **Покупка сырья для {biz_info['name']}**\n"
-            f"Ресурс: {res_info['name']} | Цена/ед.: {current_price:,}$\n"
-            f"Для одного цикла требуется: {required_res} ед.\n"
-            f"Введите *количество* единиц {res_info['name']} для покупки:"
-        )
+    await call.message.answer(
+        f"📦 **Сырье: {res_name}**\n"
+        f"Текущая цена: {current_price:,}$ за ед.\n"
+        f"Введите количество единиц *{res_name}* для закупки и начала производства (0 для отмены):"
+    )
 
-@router.message(GameStates.biz_resource_input)
+@router.message(GameStates.biz_res_input)
 async def biz_res_input_finish(message: types.Message, state: FSMContext):
+    uid = message.from_user.id
+    try: units_to_buy = int(message.text)
+    except:
+        await state.clear()
+        return await message.answer("❌ Введите корректное число.")
+    
     data = await state.get_data()
     await state.clear()
-    uid = message.from_user.id
     
-    try: units_to_buy = int(message.text)
-    except: return await message.answer("❌ Введите число.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
+    if units_to_buy == 0:
+        return await message.answer("Отменено.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
+    if units_to_buy <= 0:
+        return await message.answer("❌ Количество должно быть положительным.")
 
-    biz_db_id = data['biz_db_id']
+    bid = data['business_id']
     price = data['price']
     total_cost = units_to_buy * price
     
     try:
         with SessionLocal() as s:
             u = s.query(User).filter_by(telegram_id=uid).with_for_update().first()
-            b = s.query(OwnedBusiness).filter_by(id=biz_db_id, user_id=uid).with_for_update().first()
-            
             if u.balance < total_cost:
-                 return await message.answer(f"❌ Не хватает наличных. Требуется: {total_cost:,}$")
+                return await message.answer(f"❌ Не хватает {total_cost - u.balance:,}$ для покупки сырья.")
             
-            # Транзакция
+            # 1. Списание средств
             u.balance -= total_cost
-            b.resource_stock += units_to_buy
             
-            # Автоматический запуск производства, если сырья достаточно
-            biz_info = BUSINESSES.get(b.business_id)
-            required_res = biz_info['resource_per_cycle'] * b.count
+            # 2. Поиск первого бизнеса этого типа в режиме IDLE
+            b = s.query(OwnedBusiness).filter_by(user_id=uid, business_id=bid, production_state="IDLE").with_for_update().first()
             
-            msg_prod = f"Запас сырья: {b.resource_stock} ед."
+            if not b:
+                s.commit() # Сохраняем списание, даже если не нашли бизнес (на всякий случай)
+                return await message.answer("❌ Не удалось найти свободный бизнес этого типа. Возможно, он был запущен.")
             
-            # Логика запуска, если IDLE и достаточно сырья
-            if b.production_state == "IDLE" and b.resource_stock >= required_res:
-                 b.production_state = "PRODUCING"
-                 b.resource_stock -= required_res
-                 b.production_start_time = datetime.now()
-                 msg_prod = "🏭 *Производство запущено!*"
+            # 3. Запуск производства
+            b.production_state = "PRODUCING"
+            b.production_start_time = datetime.now()
+            b.resource_units = units_to_buy
+            
+            biz_name = BUSINESSES[bid]['name']
             
             s.commit()
             
             await message.answer(
-                f"✅ **Покупка и Загрузка Успешны!**\n"
-                f"Куплено {units_to_buy} ед. за {total_cost:,}$\n"
-                f"{msg_prod}",
-                reply_markup=get_main_kb(u.is_admin, u.is_president)
+                f"✅ **Производство Запущено!**\n"
+                f"Бизнес: *{biz_name}*\n"
+                f"Закуплено сырья: {units_to_buy:,} ед. (-{total_cost:,}$)\n"
+                f"⏳ Ожидаемое время завершения: {PRODUCTION_CYCLE_HOURS} часов."
             )
+            
+    except SQLAlchemyError:
+        await message.answer("❌ Ошибка БД при запуске производства.")
 
-    except SQLAlchemyError as e:
-        logging.error(f"Biz Resource DB Error: {e}")
-        await message.answer("❌ Ошибка БД при покупке сырья.")
-    except Exception as e:
-        # Ловим другие ошибки, чтобы не сломать FSM
-        logging.error(f"Biz Resource General Error: {e}")
-        await message.answer("❌ Произошла внутренняя ошибка.")
-    finally: await message.answer("Возврат в меню.", reply_markup=get_main_kb(get_user(uid).is_admin, get_user(uid).is_president))
-
-# --- Сбор готовой продукции ---
-@router.callback_query(F.data == "biz_collect_all")
-async def biz_collect_all(call: types.CallbackQuery):
+# --- Сбор Продукции ---
+@router.callback_query(F.data == "biz_collect")
+async def biz_collect(call: types.CallbackQuery):
     await call.answer()
     uid = call.from_user.id
-    
-    total_income_net = 0
-    collected_units = 0
-    total_tax = 0 # Новая переменная для расчета налога
     
     try:
         with SessionLocal() as s:
             u = s.query(User).filter_by(telegram_id=uid).with_for_update().first()
-            est = s.query(ElectionState).first()
-            tax_rate = est.tax_rate if est else 0.10
+            tax_rate = get_current_tax_rate()
             
-            bizs = s.query(OwnedBusiness).filter_by(user_id=uid, production_state="READY").with_for_update().all()
+            # Ищем бизнесы со статусом READY
+            bizs_ready = s.query(OwnedBusiness).filter_by(user_id=uid, production_state="READY").with_for_update().all()
             
-            for b in bizs:
-                biz_info = BUSINESSES.get(b.business_id)
-                if not biz_info: continue
+            if bizs_ready:
+                total_income_gross = 0
+                collected_units = 0
                 
-                # Расчет дохода
-                current_payout = int(biz_info['base_payout'] * (biz_info['payout_mult'] ** (b.upgrade_level - 1)))
-                raw_payout = current_payout * b.count
+                for b in bizs_ready:
+                    biz_info = BUSINESSES.get(b.business_id)
+                    if not biz_info: continue
+                    
+                    # Расчет текущего дохода (с учетом уровня и количества сырья)
+                    # Выход = Базовый_Выход * (Мультипликатор)^(Уровень-1)
+                    # Учитываем, что каждый бизнес производит 1 ед. продукции за цикл,
+                    # умноженную на количество купленного сырья (единицы = количество циклов)
+                    
+                    # 1. Доход за 1 цикл (1 ед. бизнеса)
+                    payout_per_cycle = biz_info['base_payout'] * (biz_info['payout_mult'] ** (b.upgrade_level - 1))
+                    
+                    # 2. Общий доход = Доход_за_цикл * Кол-во_сырья
+                    # Примечание: тут логика немного изменена, чтобы доход зависел от вложенного сырья
+                    income_for_biz = int(payout_per_cycle * b.resource_units)
+                    
+                    total_income_gross += income_for_biz
+                    collected_units += b.resource_units
+                    
+                    # Сброс состояния
+                    b.production_state = "IDLE"
+                    b.production_start_time = None
+                    b.resource_units = 0
                 
-                # Налоговое отчисление
-                tax_amount = int(raw_payout * tax_rate)
-                net_payout = raw_payout - tax_amount
+                # Расчет налога
+                total_tax = int(total_income_gross * tax_rate)
+                total_income_net = total_income_gross - total_tax
                 
-                total_income_net += net_payout
-                total_tax += tax_amount
-                collected_units += b.count
-                
-                # Сброс состояния и попытка повторного запуска
-                b.production_state = "IDLE"
-                
-                required_res = biz_info['resource_per_cycle'] * b.count
-                if b.resource_stock >= required_res:
-                     b.production_state = "PRODUCING"
-                     b.resource_stock -= required_res
-                     b.production_start_time = datetime.now()
-                
-            if total_income_net > 0:
                 u.balance += total_income_net
                 
                 # Налоговые отчисления идут в госбюджет
@@ -1094,11 +936,14 @@ async def biz_upgrade_do(call: types.CallbackQuery):
             
             biz_info = BUSINESSES.get(b.business_id)
             if b.upgrade_level >= biz_info['max_level']:
-                return await call.message.answer("❌ Достигнут максимальный уровень улучшения.")
+                return await call.message.answer("❌ Достигнут максимальный максимальный уровень улучшения.")
                 
             u.balance -= cost
             b.upgrade_level += 1
             
+            # Расчет нового дохода: base_payout * multiplier^(level - 1)
+            # Примечание: в предыдущей логике level-1 было для следующего уровня, 
+            # здесь (b.upgrade_level - 1) - это новый, уже увеличенный уровень.
             new_payout = int(biz_info['base_payout'] * (biz_info['payout_mult'] ** (b.upgrade_level - 1)))
             
             s.commit()
@@ -1195,7 +1040,7 @@ async def casino_finish(message: types.Message, state: FSMContext):
         await message.answer(msg, reply_markup=get_main_kb(u.is_admin, u.is_president))
 
 # =========================================================
-# === 8. БИРЖА РЕСУРСОВ (ДИНАМИЧЕСКИЕ ЦЕНЫ) ===
+# === 9. БИРЖА РЕСУРСОВ (ДИНАМИЧЕСКИЕ ЦЕНЫ) ===
 # =========================================================
 
 @router.message(F.text == BTN_MARKET)
@@ -1220,7 +1065,7 @@ async def market_buy_start(call: types.CallbackQuery, state: FSMContext):
     # Логика FSM для покупки сырья реализована в секции бизнеса.
 
 # =========================================================
-# === 9. КРИМИНАЛЬНЫЕ АКТИВНОСТИ (ОГРАБЛЕНИЕ БАНКА) ===
+# === 10. КРИМИНАЛЬНЫЕ АКТИВНОСТИ (ОГРАБЛЕНИЕ БАНКА) ===
 # =========================================================
 
 @router.message(F.text == BTN_CRIME)
@@ -1228,7 +1073,8 @@ async def cmd_crime(message: types.Message):
     u = get_user(message.from_user.id)
     if u.arrest_expires and u.arrest_expires > datetime.now():
         # ИСПРАВЛЕНО: format_cooldown принимает datetime.now() как last_time для jail
-        left = format_cooldown(datetime.now(), u.arrest_expires - datetime.now())
+        left_time = u.arrest_expires - datetime.now()
+        left = format_cooldown(datetime.now(), left_time)
         return await message.answer(f"🔒 Вы в тюрьме. Осталось: {left}")
     
     cooldown = timedelta(hours=6)
@@ -1245,7 +1091,7 @@ async def cmd_crime(message: types.Message):
     
     # Защита от нулевого баланса
     if u.balance < CASINO_MIN_BET:
-        return await message.answer("❌ У вас слишком мало наличных для ограбления. Нужно хотя бы 10,000$.")
+        return await message.answer("❌ У вас слишком мало наличных для ограбления. Нужно хотя бы 10,000$ (Минимальная ставка).")
     
     try:
         with SessionLocal() as s:
@@ -1282,7 +1128,7 @@ async def cmd_crime(message: types.Message):
         await message.answer("❌ Ошибка БД при попытке преступления.")
 
 # =========================================================
-# === 10. ПОЛИТИКА И ОФИС ПРЕЗИДЕНТА ===
+# === 11. ПОЛИТИКА И ОФИС ПРЕЗИДЕНТА ===
 # =========================================================
 
 @router.message(F.text == "🏛 Политика")
@@ -1416,16 +1262,22 @@ async def pres_give_budget_finish(message: types.Message, state: FSMContext):
             s.commit()
             
             await message.answer(f"✅ Игроку `{target_id}` успешно выдано {amount:,}$ из Госбюджета.")
+            # Использование глобального объекта bot для отправки уведомления
             await bot.send_message(target_id, f"🚨 Президент выдал вам {amount:,}$ из Государственного Бюджета.")
 
     except Exception as e:
-        await message.answer(f"❌ Ошибка: Внутренняя ошибка или недостаточно прав.", reply_markup=get_main_kb(get_user(pres_id).is_admin, get_user(pres_id).is_president))
+        # Проверка, если сообщение было от президента, чтобы вернуть ему клавиатуру
+        is_pres = get_user(pres_id).is_president
+        is_admin = get_user(pres_id).is_admin
+        await message.answer(f"❌ Ошибка: Внутренняя ошибка или недостаточно прав.", reply_markup=get_main_kb(is_admin, is_pres))
         logging.error(f"Pres Budget FSM Error: {e}")
         
-    finally: await message.answer("Возврат в меню.", reply_markup=get_main_kb(get_user(pres_id).is_admin, get_user(pres_id).is_president))
+    finally:
+        # Дополнительный возврат в меню, если предыдущая отправка не сработала
+        pass
 
 # =========================================================
-# === 11. ФОНОВЫЕ ЗАДАЧИ (SCHEDULER) ===
+# === 12. ФОНОВЫЕ ЗАДАЧИ (SCHEDULER) ===
 # =========================================================
 
 async def check_elections_and_payouts():
@@ -1453,6 +1305,7 @@ async def check_elections_and_payouts():
                 # Отправка уведомления пользователю
                 biz_name = BUSINESSES.get(b.business_id)['name']
                 try:
+                    # Использование глобального объекта bot
                     await bot.send_message(b.user_id, f"✅ **ПРОИЗВОДСТВО ЗАВЕРШЕНО!** Ваш бизнес *{biz_name}* готов к сбору продукции.")
                 except TelegramAPIError:
                     pass # Игнорируем ошибки, если бот заблокирован
@@ -1464,6 +1317,7 @@ async def check_elections_and_payouts():
             if now > loan.due_date:
                 # Если просрочено, штрафуем (переводим налог в Госбюджет)
                 loan_days_overdue = (now - loan.due_date).days
+                # Начисляем штраф каждый LOAN_CYCLE_DAYS дней после просрочки
                 if loan_days_overdue > 0 and loan_days_overdue % LOAN_CYCLE_DAYS == 0:
                     budget = s.query(PresidentialBudget).with_for_update().first()
                     fine_amount = int(loan.amount * loan.interest_rate * 2) # Двойной процент за просрочку
@@ -1481,7 +1335,8 @@ async def check_elections_and_payouts():
                         pass
                         
         # --- D. Проверка Тюрьмы ---
-        jailed_users = s.query(User).filter(User.arrest_expires > now).with_for_update().all()
+        # NOTE: Фильтр должен быть `User.arrest_expires > now`
+        jailed_users = s.query(User).filter(User.arrest_expires.isnot(None), User.arrest_expires <= now).with_for_update().all()
         for u in jailed_users:
             if u.arrest_expires and u.arrest_expires <= now:
                 u.arrest_expires = None
@@ -1490,7 +1345,7 @@ async def check_elections_and_payouts():
                 except TelegramAPIError: pass
 
         # --- E. Проверка и Запуск Выборов ---
-        # (Логика выборов оставлена без изменений)
+        # (Логика выборов: не предоставлена, но место зарезервировано)
         # ...
 
         s.commit()
@@ -1526,7 +1381,7 @@ async def set_bot_commands(bot: Bot):
     await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
 
 # =========================================================
-# === 12. ГЛАВНЫЕ ОБРАБОТЧИКИ ОШИБОК И ЗАПУСК БОТА ===
+# === 13. ГЛАВНЫЕ ОБРАБОТЧИКИ ОШИБОК И ЗАПУСК БОТА ===
 # =========================================================
 
 # --- ИСПРАВЛЕНИЕ: Catch-all Handler для сброса FSM и ловли неизвестных команд ---
@@ -1554,10 +1409,12 @@ async def unhandled_callback(call: types.CallbackQuery):
     await call.answer("❌ Эта кнопка устарела или не существует.", show_alert=True)
     u = get_user(call.from_user.id)
     # Возвращаем главное меню на всякий случай
-    await call.message.answer("Возвращено Главное Меню.", reply_markup=get_main_kb(u.is_admin, u.is_president))
+    # Проверка на наличие message, так как колбэк может быть вызван из-за устаревшего сообщения
+    if call.message:
+        await call.message.answer("Возвращено Главное Меню.", reply_markup=get_main_kb(u.is_admin, u.is_president))
 
 # =========================================================
-# === 13. ЗАПУСК БОТА ===
+# === 14. ЗАПУСК БОТА ===
 # =========================================================
 
 async def main():
