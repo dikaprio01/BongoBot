@@ -1,7 +1,7 @@
 # =========================================================
 # === BongoCity Telegram Bot: Полный Код (Python/aiogram) ===
 # =========================================================
-
+import os
 import logging
 import random
 import asyncio
