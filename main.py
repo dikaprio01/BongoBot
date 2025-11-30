@@ -45,7 +45,7 @@ dp.include_router(router)
 scheduler = AsyncIOScheduler()
 
 # Инициализация БД
-engine = create_engine(MYSQL_URL, connect_args={"check_same_thread": False})
+engine = create_engine(MYSQL_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
