@@ -8,6 +8,7 @@ import asyncio
 from datetime import datetime, timedelta
 
 # --- Aiogram Imports ---
+from aiogram.client.default import DefaultBotProperties
 from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
@@ -36,8 +37,8 @@ MYSQL_URL = os.getenv("MYSQL_URL") # Можно использовать Postgre
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Инициализация объектов
-bot = Bot(TOKEN, parse_mode=ParseMode.MARKDOWN)
+# Новая, правильная строка:
+bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN))
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
